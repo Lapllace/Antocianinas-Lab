@@ -1,0 +1,56 @@
+{
+  "study": {
+    "study_id": "STUDY_D",
+    "citation": "Pan et al. (2021, publicacao do volume 42(5))",
+    "title": "Stability and Degradation Kinetics of Anthocyanins from Red Cabbage",
+    "doi": "10.13386/j.issn1002-0306.2020050071",
+    "url": "https://www.spgykj.com/en/article/Y2021/I5/51",
+    "source_location": "Localizacao exata no artigo pendente de conferencia; valores provenientes do resumo publicado.",
+    "notes": "Resultados em horas nao devem ser convertidos nem combinados com series em dias sem modelagem explicita."
+  },
+  "published_values": [
+    {
+      "measurement": "retention",
+      "condition": "pH 2.0, 5 h",
+      "value": 92.92,
+      "standard_deviation": 0.69,
+      "unit": "%",
+      "time_value": 5,
+      "time_unit": "h",
+      "reported_or_calculated": "reported",
+      "precision_original": "2 casas decimais (92.92), DP 0.69"
+    },
+    {
+      "measurement": "retention",
+      "condition": "40 C, escuro, 5 h",
+      "value": 70.50,
+      "standard_deviation": 0.52,
+      "unit": "%",
+      "time_value": 5,
+      "time_unit": "h",
+      "reported_or_calculated": "reported",
+      "precision_original": "2 casas decimais (70.50), DP 0.52"
+    },
+    {
+      "measurement": "half-life",
+      "condition": "50 C, pH 2.0",
+      "value": 67.28,
+      "unit": "h",
+      "symbol": "t1/2",
+      "reported_or_calculated": "reported",
+      "precision_original": "2 casas decimais (67.28 h)"
+    }
+  ],
+  "audit_rules": [
+    "Registrar as condicoes exatas para cada resultado.",
+    "Nao tratar as duas retencoes como comparacoes diretas entre si, porque representam condicoes diferentes (pH 2.0 vs 40 C escuro).",
+    "Nao deduzir uma curva temporal completa desses tres resumos.",
+    "Manter o tempo em horas; nao converter para dias."
+  ],
+  "traceability": {
+    "data_origin": "PUBLISHED_ARTICLE",
+    "reported_or_calculated": "reported",
+    "formula_used": "Nenhum cálculo derivado neste registro; valores sao publicados diretamente no resumo do artigo.",
+    "verification_status": "VERIFICATION_PENDING (localizacao exata de tabela/pagina ainda nao confirmada no texto integral)"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "status": "ML_NOT_VALIDATED",
+  "evaluation_date": "2026-10-16",
+  "reason": "Poucas series temporais independentes para estimar generalizacao",
+  "repository": "anthocyanin-liquid-study-v2",
+  "branch": "feature/scientific-skills-integration",
+  "restrictions": [
+    "Nao declarar melhor modelo",
+    "Nao usar split aleatorio por linha",
+    "Nao declarar previsoes confiaveis",
+    "Artigo do alface (Falcioni et al., 2022) e referencia metodologica apenas; nao valida automaticamente o modelo de repolho roxo"
+  ],
+  "data_separation_verified": {
+    "experimental_only_in_training": true,
+    "literature_excluded": true,
+    "simulation_excluded": true,
+    "no_train_test_leakage_by_batch": true,
+    "no_row_level_random_split": true
+  },
+  "checks_performed": [
+    "Reprodutibilidade: mesmas entradas, modelo e configuracoes produzem as mesmas previsoes",
+    "Modelo de referencia simples (DummyRegressor) calculado corretamente",
+    "Metricas MAE, RMSE, R2, viés e residuos implementadas corretamente",
+    "Nenhuma linha do treino aparece no teste",
+    "Pontos do mesmo estudo/lote nao vazam entre treino e teste (GroupKFold)",
+    "Dados de literatura e simulacao nao se tornam dados experimentais",
+    "Sementes, configuracoes, divisao e versao do modelo registradas"
+  ],
+  "comparison_permitted": false,
+  "comparison_justification": "Quantidade e estrutura dos dados nao permitem comparacao valida entre Random Forest, PLSR e referencia simples",
+  "notes": "ML_NOT_VALIDATED: não produzir classificação de melhor modelo, não declarar previsões confiáveis."
+}

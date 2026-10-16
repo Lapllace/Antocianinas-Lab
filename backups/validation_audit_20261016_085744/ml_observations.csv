@@ -1,0 +1,1 @@
+record_id,data_origin,batch_id,formulation,storage_condition,temperature_c,light_condition,oxygen_condition,container_material,headspace_ratio_pct,preservative_or_additive,initial_pH,pH_day,day,tac_mg_c3g_L,retention_pct,hue_deg,saturation_0_1,value_0_1,delta_e_cie76_vs_day0,assay_method,instrument,independent_batch,notes

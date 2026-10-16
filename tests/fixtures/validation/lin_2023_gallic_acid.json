@@ -1,0 +1,51 @@
+{
+  "study": {
+    "study_id": "STUDY_C",
+    "citation": "Lin et al. (2023)",
+    "title": "Effect of five polyphenols on the stability of purple cabbage anthocyanins in simulated beverage systems containing L-ascorbic acid",
+    "doi": "10.1016/j.fpsl.2023.101065",
+    "url": "https://doi.org/10.1016/j.fpsl.2023.101065",
+    "source_location": "Localizacao exata no artigo pendente de conferencia; valor proveniente do resumo cinético do artigo.",
+    "notes": "Sistema de bebida simulada contendo acido L-ascorbico; nao transferir ao extrato aquoso sem calibracao."
+  },
+  "treatment": {
+    "treatment_id": "gallic_acid_0.4pct",
+    "additive": "Gallic acid",
+    "additive_concentration_pct": 0.4,
+    "matrix": "Bebida simulada contendo acido L-ascorbico",
+    "conditions": "Bebida simulada; nao representa extrato puro de repolho roxo."
+  },
+  "published_kinetic_values": [
+    {
+      "measurement": "first-order degradation constant",
+      "value": 0.0466,
+      "unit": "dia^-1",
+      "symbol": "k",
+      "reported_or_calculated": "reported",
+      "precision_original": "4 casas decimais (0.0466)"
+    },
+    {
+      "measurement": "half-life",
+      "value": 14.87,
+      "unit": "dia",
+      "symbol": "t1/2",
+      "reported_or_calculated": "reported",
+      "precision_original": "2 casas decimais (14.87)"
+    }
+  ],
+  "mathematical_benchmark": {
+    "description": "Teste de aritmetica e consistencia: t1/2 = ln(2) / k. Os dois numeros cineticos sao um benchmark do artigo, nao uma observacao laboratorial independente. Nao criar serie temporal ficticia a partir desses resumos.",
+    "formula": "t1/2 = ln(2) / k",
+    "computed_from_published_k": 14.87527011287747,
+    "published_t1_2": 14.87,
+    "tolerance_basis": "decorrente do arredondamento de k (0.0466 tem 4 casas decimais; diferenca absoluta esperada <= 0.005 dias)",
+    "tolerance_abs_days": 0.01,
+    "pass": true
+  },
+  "traceability": {
+    "data_origin": "PUBLISHED_ARTICLE",
+    "reported_or_calculated": "reported",
+    "formula_used": "Nenhum cálculo derivado neste registro; valores sao publicados diretamente no artigo.",
+    "verification_status": "VERIFICATION_PENDING (localizacao exata de tabela/pagina ainda nao confirmada no texto integral)"
+  }
+}
