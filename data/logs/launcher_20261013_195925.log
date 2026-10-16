@@ -1,0 +1,5 @@
+[2026-10-13 19:59:25] [INFO] === Iniciando Antocianinas Estabilidade Lab ===
+[2026-10-13 19:59:32] [INFO] Iniciando Streamlit em 127.0.0.1:8501 (cmd: C:\Users\Werlen\Downloads\anthocyanin-liquid-study-v2\.venv\Scripts\python.exe -m streamlit run C:\Users\Werlen\Downloads\anthocyanin-liquid-study-v2\app.py --server.address 127.0.0.1 --server.port 8501 --server.headless false --client.toolbarMode minimal)
+[2026-10-13 19:59:32] [INFO] Processo do Streamlit iniciado (PID=13532).
+[2026-10-13 19:59:36] [INFO] Streamlit pronto em http://127.0.0.1:8501.
+[2026-10-13 19:59:36] [INFO] Encerrando o servidor Streamlit.

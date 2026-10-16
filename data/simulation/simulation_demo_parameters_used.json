@@ -1,0 +1,68 @@
+{
+  "model": "first_order_arrhenius_scenario",
+  "purpose": "DEMONSTRAÇÃO ARTIFICIAL: parâmetros escolhidos para testar o código, não obtidos de experimento nem calibrados para prever o extrato do usuário.",
+  "reference_temperature_c": 25.0,
+  "reference_half_life_days": 10.0,
+  "activation_energy_kj_mol": 40.0,
+  "initial_retention_pct": 100.0,
+  "days": [
+    0,
+    3,
+    7,
+    10,
+    14,
+    28
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "C4_DARK",
+      "label": "4 °C, escuro; fatores neutros",
+      "temperature_c": 4.0,
+      "pH_factor": 1.0,
+      "light_factor": 1.0,
+      "oxygen_factor": 1.0,
+      "packaging_factor": 1.0,
+      "notes": "Somente temperatura; multiplicadores de efeito iguais a 1."
+    },
+    {
+      "scenario_id": "C25_DARK",
+      "label": "25 °C, escuro; referência",
+      "temperature_c": 25.0,
+      "pH_factor": 1.0,
+      "light_factor": 1.0,
+      "oxygen_factor": 1.0,
+      "packaging_factor": 1.0,
+      "notes": "Cenário de referência artificial."
+    },
+    {
+      "scenario_id": "C4_LIGHT_HYP",
+      "label": "4 °C, luz (fator hipotético 1,5)",
+      "temperature_c": 4.0,
+      "pH_factor": 1.0,
+      "light_factor": 1.5,
+      "oxygen_factor": 1.0,
+      "packaging_factor": 1.0,
+      "notes": "Fator de luz hipotético para demonstrar sensibilidade; não é estimativa publicada."
+    },
+    {
+      "scenario_id": "C4_LOW_O2_HYP",
+      "label": "4 °C, menor exposição ao O₂ (fator hipotético 0,8)",
+      "temperature_c": 4.0,
+      "pH_factor": 1.0,
+      "light_factor": 1.0,
+      "oxygen_factor": 0.8,
+      "packaging_factor": 1.0,
+      "notes": "Multiplicador de degradação hipotético; precisa ser calibrado experimentalmente."
+    },
+    {
+      "scenario_id": "C4_PH_HYP",
+      "label": "4 °C, formulação/pH alternativo (fator hipotético 0,8)",
+      "temperature_c": 4.0,
+      "pH_factor": 0.8,
+      "light_factor": 1.0,
+      "oxygen_factor": 1.0,
+      "packaging_factor": 1.0,
+      "notes": "Efeito de pH artificialmente assumido para demonstrar o modelo; a direção real precisa ser testada."
+    }
+  ]
+}
