@@ -20,7 +20,7 @@
   "checks_performed": [
     "Reprodutibilidade: mesmas entradas, modelo e configuracoes produzem as mesmas previsoes",
     "Modelo de referencia simples (DummyRegressor) calculado corretamente",
-    "Metricas MAE, RMSE, R2, viés e residuos implementadas corretamente",
+    "MAE, RMSE e R2_pooled são calculados; resíduos individuais observed - predicted são registrados. Não há média de viés calculada.",
     "Nenhuma linha do treino aparece no teste",
     "Pontos do mesmo estudo/lote nao vazam entre treino e teste (GroupKFold)",
     "Dados de literatura e simulacao nao se tornam dados experimentais",
@@ -28,5 +28,12 @@
   ],
   "comparison_permitted": false,
   "comparison_justification": "Quantidade e estrutura dos dados nao permitem comparacao valida entre Random Forest, PLSR e referencia simples",
-  "notes": "ML_NOT_VALIDATED: não produzir classificação de melhor modelo, não declarar previsões confiáveis."
+  "production_metrics": [
+    "MAE",
+    "RMSE",
+    "R2_pooled",
+    "residual_model = observed - predicted"
+  ],
+  "mean_bias_metric_implemented": false,
+  "notes": "ML_NOT_VALIDATED: não produzir classificação de melhor modelo, não declarar previsões confiáveis. Não há métrica explícita de viés médio; residual_model por observação não equivale à média do viés."
 }

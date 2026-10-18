@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import math
-import colorsys
+import unicodedata
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "anthocyanin_lab.py"
@@ -61,9 +63,7 @@ class TestPHDifferentialMethod(unittest.TestCase):
         """C (mg/L) = A * MW * DF * 1000 / (epsilon * l)"""
         rows = [self._stability_row(0.500, 0.020, 0.040, 0.020)]
         out = lab.calculate_tac(pd.DataFrame(rows))
-        A = (0.500 - 0.020) - (0.040 - 0.020)
-        expected_C = A * MW_C3G * 10.0 * 1000.0 / (EPSILON_C3G * 1.0)
-        self.assertAlmostEqual(out.loc[0, "tac_mg_c3g_L"], expected_C, places=6)
+        self.assertAlmostEqual(out.loc[0, "tac_mg_c3g_L"], 76.81487, places=4)
         self.assertIn("tac_mg_c3g_L", out.columns)
 
     def test_tac_equal_absorbances_yields_zero(self):
@@ -135,7 +135,18 @@ class TestRetentionPercent(unittest.TestCase):
         ]
         out = lab.calculate_tac(pd.DataFrame(rows))
         r7 = out.loc[out["day"] == 7, "retention_pct"].iloc[0]
-        self.assertTrue(pd.isna(r7) or bool(out.loc[out["day"] == 7, "qc_flag"].iloc[0]))
+        self.assertTrue(pd.isna(r7))
+        self.assertIn("baseline", out.loc[out["day"] == 7, "qc_flag"].iloc[0].lower())
+
+    def test_retention_negative_baseline_returns_nan_with_alert(self):
+        rows = [
+            self._row(day=0, tac_pct=-5.0),
+            self._row(day=7, tac_pct=50.0),
+        ]
+        out = lab.calculate_tac(pd.DataFrame(rows))
+        r7 = out.loc[out["day"] == 7].iloc[0]
+        self.assertTrue(pd.isna(r7["retention_pct"]))
+        self.assertIn("baseline", r7["qc_flag"].lower())
 
     def test_retention_invalid_concentration_rejected(self):
         """Concentrações invalidas (negativas) devem ser sinalizadas."""
@@ -193,20 +204,7 @@ class TestRetentionPercent(unittest.TestCase):
 
 
 class TestFirstOrderKinetics(unittest.TestCase):
-    """Validar ln(C_t/C_0) = -k t e t_1/2 = ln(2)/k."""
-
-    def test_half_life_from_k(self):
-        """t1/2 = ln(2) / k."""
-        k = 0.1
-        expected_t_half = math.log(2) / k
-        self.assertAlmostEqual(expected_t_half, 6.931471805599453, places=6)
-
-    def test_kinetics_units_k_and_half_life(self):
-        """Unidades de k (tempo^-1) e meia-vida (tempo) sao consistentes."""
-        k = 0.0466
-        t_half = math.log(2) / k
-        self.assertAlmostEqual(t_half, 14.8744, places=4)
-        self.assertAlmostEqual(k * t_half, math.log(2), places=6)
+    """Validar ajustes pela função de produção."""
 
     def test_kinetics_rejects_non_positive_data(self):
         """Dados nao positivos (concentracao <= 0) nao geram ln valido."""
@@ -218,39 +216,44 @@ class TestFirstOrderKinetics(unittest.TestCase):
         fits = lab.fit_kinetics(out)
         self.assertTrue(len(fits) == 0 or fits["k_per_day"].isna().any())
 
-    def test_kinetics_hours_vs_days_not_converted(self):
-        """Tempos em horas vs dias nao sao convertidos automaticamente."""
-        rows_days = [self._kin_row(day=d, tac=100.0 * math.exp(-0.1 * d)) for d in [0, 7, 14]]
-        out_days = lab.calculate_tac(pd.DataFrame(rows_days))
-        fit_days = lab.fit_kinetics(out_days)
-        if len(fit_days) > 0:
-            # Ajuste exploratorio feito; nao ha conversao implicita de horas para dias
-            self.assertTrue("explorat" in str(fit_days.iloc[0]["fit_note"]).lower())
-
-    def test_kinetics_rounded_parameters(self):
-        """Parametros arredondados ainda devem produzir ajuste consistente."""
-        rows = [self._kin_row(day=d, tac=round(100.0 * math.exp(-0.05 * d), 1)) for d in [0, 7, 14, 21]]
+    def test_fit_recovers_known_rate_and_half_life(self):
+        expected_k = 0.037
+        initial = 120.0
+        rows = [
+            self._kin_row(day=day, tac=initial * math.exp(-expected_k * day))
+            for day in [0, 3, 7, 14, 21]
+        ]
         out = lab.calculate_tac(pd.DataFrame(rows))
         fit = lab.fit_kinetics(out)
-        if len(fit) > 0:
-            k = fit.iloc[0]["k_per_day"]
-            t_half = fit.iloc[0]["half_life_days"]
-            self.assertAlmostEqual(t_half, math.log(2) / k, places=4)
+        self.assertEqual(len(fit), 1)
+        self.assertAlmostEqual(fit.iloc[0]["k_per_day"], expected_k, delta=1e-10)
+        self.assertAlmostEqual(fit.iloc[0]["half_life_days"], math.log(2) / expected_k, delta=1e-8)
 
-    def test_kinetics_fit_error_when_ss_tot_zero(self):
-        """Quando todos os valores sao iguais, ss_tot = 0 -> R^2 indefinido."""
-        rows = [self._kin_row(day=d, tac=100.0) for d in [0, 7, 14]]
+    def test_shared_baseline_is_aggregated_like_tac(self):
+        rows = [
+            self._kin_row(day=0, tac=100.0, condition="BASELINE"),
+            self._kin_row(day=0, tac=140.0, condition="BASELINE"),
+            *[
+                self._kin_row(day=day, tac=120.0 * math.exp(-0.02 * day), condition="4C_dark")
+                for day in (3, 7, 14)
+            ],
+        ]
         out = lab.calculate_tac(pd.DataFrame(rows))
+        baseline = out.loc[out["storage_condition"] == "4C_dark", "day0_tac_mg_c3g_L"].iloc[0]
+        self.assertAlmostEqual(baseline, 120.0, places=7)
         fit = lab.fit_kinetics(out)
-        if len(fit) > 0:
-            self.assertTrue(pd.isna(fit.iloc[0]["r_squared"]) or fit.iloc[0]["r_squared"] == 0.0)
-            # Quando ss_tot = 0, r_squared deve ser NaN (ajuste sem variancia)
+        self.assertAlmostEqual(
+            fit.loc[fit["storage_condition"] == "4C_dark", "k_per_day"].iloc[0],
+            0.02,
+            delta=1e-10,
+        )
 
-    def _kin_row(self, day, tac):
+    def _kin_row(self, day, tac, condition="4C_dark"):
+        absorbance_difference = tac * EPSILON_C3G / (MW_C3G * 10.0 * 1000.0)
         return {
-            "batch_id": "B1", "formulation": "native", "storage_condition": "4C_dark",
+            "batch_id": "B1", "formulation": "native", "storage_condition": condition,
             "day": day, "vial_id": f"V{day}", "replicate": 1, "pH_storage": 4.0,
-            "a520_ph1": 0.500 + tac / 1000, "a700_ph1": 0.020,
+            "a520_ph1": absorbance_difference + 0.040, "a700_ph1": 0.020,
             "a520_ph45": 0.040, "a700_ph45": 0.020,
             "dilution_factor": 10.0, "path_length_cm": 1.0, "notes": "",
         }
@@ -259,93 +262,104 @@ class TestFirstOrderKinetics(unittest.TestCase):
 
 
 class TestArrhenius(unittest.TestCase):
-    """Validar ln(k) = ln(A) - Ea/(R T). T obrigatoriamente em kelvin."""
+    """Verificar saída determinística do simulador em temperaturas diferentes."""
 
-    def test_arrhenius_temperature_must_be_kelvin(self):
-        """Temperatura deve estar em kelvin; Celsius nao e aceito diretamente."""
-        T_c = 25.0
-        T_k = T_c + 273.15
-        self.assertAlmostEqual(T_k, 298.15, places=2)
+    def _config(self, temperatures=(25.0, 35.0)):
+        return {
+            "reference_temperature_c": 25.0,
+            "reference_half_life_days": 10.0,
+            "activation_energy_kj_mol": 40.0,
+            "initial_retention_pct": 100.0,
+            "days": [0, 7],
+            "scenarios": [
+                {"scenario_id": f"T{temp:g}", "label": f"{temp:g} C", "temperature_c": temp,
+                 "pH_factor": 1.0, "light_factor": 1.0, "oxygen_factor": 1.0,
+                 "packaging_factor": 1.0}
+                for temp in temperatures
+            ],
+        }
 
-    def test_arrhenius_ea_explicit_unit(self):
-        """Energia de ativacao com unidade explicita (kJ/mol -> J/mol na calculacao)."""
-        Ea_kj = 50.0
-        Ea_j = Ea_kj * 1000
-        R = 8.314
-        self.assertAlmostEqual(Ea_j, 50000.0, places=2)
+    def test_simulator_rates_and_positive_day_retention_at_two_temperatures(self):
+        results = lab.simulate_scenarios(self._config())
+        rates = results.groupby("temperature_c")["k_per_day_simulated"].first()
+        expected_ref = math.log(2) / 10.0
+        expected_hot = expected_ref * math.exp(
+            -(40000.0 / 8.314462618) * (1.0 / 308.15 - 1.0 / 298.15)
+        )
+        self.assertAlmostEqual(rates.loc[25.0], expected_ref, delta=1e-12)
+        self.assertAlmostEqual(rates.loc[35.0], expected_hot, delta=1e-12)
+        day7 = results.loc[(results["temperature_c"] == 35.0) & (results["day"] == 7),
+                           "retention_pct_simulated"].iloc[0]
+        self.assertAlmostEqual(day7, 100.0 * math.exp(-expected_hot * 7), delta=1e-10)
 
-    def test_arrhenius_kinetic_rate_time_unit_compatible(self):
-        """Taxa cinetica com unidade temporal compatível com a meia-vida."""
-        k_per_day = 0.0466
-        t_half_days = math.log(2) / k_per_day
-        self.assertAlmostEqual(t_half_days, 14.875, places=2)
-
-    def test_arrhenius_refuses_incompatible_matrices(self):
-        """Nao estimar Arrhenius combinando estudos com matrizes/solventes/metodos incompatíveis."""
-        studies = pd.DataFrame([
-            {"study_id": "A", "matrix": "extrato aquoso", "solvent": "agua", "time_unit": "dia", "value_unit": "mg/L"},
-            {"study_id": "B", "matrix": "bebida mista", "solvent": "n/a", "time_unit": "mes", "value_unit": "mg/L"},
-        ])
-        self.assertNotEqual(studies.loc[0, "time_unit"], studies.loc[1, "time_unit"])
-        self.assertNotEqual(studies.loc[0, "matrix"], studies.loc[1, "matrix"])
-
-    def test_arrhenius_insufficient_data_rejected(self):
-        """Identificar quando dados sao insuficientes para ajustar o modelo Arrhenius."""
-        temps_k = [298.15]
-        self.assertLess(len(temps_k), 2)
-
+    def test_simulator_rejects_non_finite_and_out_of_domain_parameters(self):
+        for key, value in [
+            ("reference_temperature_c", float("nan")),
+            ("reference_half_life_days", float("inf")),
+            ("activation_energy_kj_mol", float("nan")),
+            ("initial_retention_pct", float("inf")),
+            ("initial_retention_pct", -1.0),
+            ("activation_energy_kj_mol", -0.01),
+        ]:
+            with self.subTest(parameter=key):
+                cfg = self._config()
+                cfg[key] = value
+                with self.assertRaises(ValueError):
+                    lab.simulate_scenarios(cfg)
+        for temperature in (-273.15, float("nan"), float("inf")):
+            with self.subTest(temperature=temperature):
+                with self.assertRaises(ValueError):
+                    lab.simulate_scenarios(self._config((temperature,)))
+        for factor in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(factor=factor):
+                cfg = self._config((25.0,))
+                cfg["scenarios"][0]["oxygen_factor"] = factor
+                with self.assertRaises(ValueError):
+                    lab.simulate_scenarios(cfg)
+        cfg = self._config()
+        cfg["days"] = [float("nan")]
+        with self.assertRaises(ValueError):
+            lab.simulate_scenarios(cfg)
 
 
 class TestColorConversions(unittest.TestCase):
-    """Validar RGB, HSV, espaco de cor e ΔE*ab."""
+    """Testar HSV e ΔE para RGB e CIELAB recebidos."""
 
-    def test_rgb_to_hsv_known_cases(self):
-        """Casos conhecidos de conversao RGB -> HSV."""
-        h, s, v = colorsys.rgb_to_hsv(255 / 255, 0 / 255, 0 / 255)
-        self.assertAlmostEqual(h, 0.0, places=6)
-        self.assertAlmostEqual(s, 1.0, places=6)
-        self.assertAlmostEqual(v, 1.0, places=6)
-        h, s, v = colorsys.rgb_to_hsv(0 / 255, 0 / 255, 255 / 255)
-        self.assertAlmostEqual(h, 2 / 3, places=6)
+    def _row(self, day, rgb, lab_values, condition="4C_dark"):
+        return {
+            "batch_id": "B1", "formulation": "native", "storage_condition": condition,
+            "day": day, "vial_id": f"C{day}", "replicate": 1, "target_pH": 4.0,
+            "measured_pH_final": 4.0, "r": rgb[0], "g": rgb[1], "b": rgb[2],
+            "L_star": lab_values[0], "a_star": lab_values[1], "b_star": lab_values[2],
+            "absorbance_max_nm": 520, "absorbance_max": 0.8, "notes": "",
+        }
 
-    def test_rgb_out_of_range(self):
-        """Valores RGB fora de 0-255 sao invalidos (verificado na camada de persistencia)."""
-        # colorsys nao valida range; a validacao de range fica em anthocyanin_persistence.
-        # Aqui apenas confirmamos que valores dentro do range funcionam.
-        h, s, v = colorsys.rgb_to_hsv(255 / 255, 0 / 255, 0 / 255)
-        self.assertAlmostEqual(h, 0.0, places=6)
+    def test_known_rgb_and_cielab_values_pass_through_production_function(self):
+        result = lab.add_hsv_and_delta_e(pd.DataFrame([
+            self._row(0, (128, 64, 32), (50, 10, -5)),
+            self._row(7, (230, 10, 10), (48, 13, -1)),
+        ]))
+        self.assertAlmostEqual(result.loc[0, "hue_deg"], 20.0, places=6)
+        self.assertAlmostEqual(result.loc[0, "saturation_0_1"], 0.75, places=6)
+        self.assertAlmostEqual(result.loc[0, "value_0_1"], 128 / 255, places=6)
+        self.assertAlmostEqual(result.loc[0, "delta_e_cie76_vs_day0"], 0.0, places=6)
+        self.assertAlmostEqual(result.loc[1, "delta_e_cie76_vs_day0"], math.sqrt(29), places=6)
 
-    def test_delta_e_identical_colors_is_zero(self):
-        """ΔE*ab = sqrt((dL)^2 + (da)^2 + (db)^2); cores idênticas -> 0."""
-        L1, a1, b1 = 50.0, 60.0, 40.0
-        L2, a2, b2 = 50.0, 60.0, 40.0
-        de = math.sqrt((L2 - L1) ** 2 + (a2 - a1) ** 2 + (b2 - b1) ** 2)
-        self.assertAlmostEqual(de, 0.0, places=6)
+    def test_missing_rgb_and_cielab_values_remain_missing(self):
+        result = lab.add_hsv_and_delta_e(pd.DataFrame([
+            self._row(0, (255, 0, 0), (50, 10, 5)),
+            self._row(7, (float("nan"), 0, 0), (float("nan"), 10, 5)),
+        ]))
+        self.assertTrue(result.loc[1, ["hue_deg", "saturation_0_1", "value_0_1",
+                                       "delta_e_cie76_vs_day0"]].isna().all())
 
-    def test_delta_e_known_difference(self):
-        """ΔE*ab com diferença conhecida."""
-        L1, a1, b1 = 50.0, 60.0, 40.0
-        L2, a2, b2 = 51.0, 62.0, 43.0
-        de = math.sqrt((L2 - L1) ** 2 + (a2 - a1) ** 2 + (b2 - b1) ** 2)
-        expected = math.sqrt(1 + 4 + 9)
-        self.assertAlmostEqual(de, expected, places=6)
-
-    def test_delta_e_missing_values(self):
-        """Comportamento com valores ausentes (NaN) -> resultado NaN."""
-        L1, a1, b1 = 50.0, 60.0, 40.0
-        L2 = float("nan")
-        a2, b2 = 60.0, 40.0
-        de = math.sqrt((L2 - L1) ** 2 + (a2 - a1) ** 2 + (b2 - b1) ** 2)
-        self.assertTrue(pd.isna(de))
-
-    def test_hsv_missing_rgb(self):
-        """RGB ausente -> HSV NaN."""
-        r = float("nan")
-        self.assertTrue(pd.isna(r))
-
-    def test_rgb_colorspace_assumption_documented(self):
-        """Documentar espaco RGB (sRGB 8-bit assumido), gama, ponto branco."""
-        self.assertTrue(True)
+    def test_color_delta_e_uses_shared_baseline(self):
+        result = lab.add_hsv_and_delta_e(pd.DataFrame([
+            self._row(0, (128, 64, 32), (50, 10, -5), condition="BASELINE"),
+            self._row(7, (230, 10, 10), (48, 13, -1)),
+        ]))
+        self.assertAlmostEqual(result.loc[1, "L_star_day0"], 50.0, places=6)
+        self.assertAlmostEqual(result.loc[1, "delta_e_cie76_vs_day0"], math.sqrt(29), places=6)
 
 
 
@@ -377,7 +391,32 @@ class TestSimulator(unittest.TestCase):
                                  "packaging_factor": 1.0, "notes": ""}]
         r_hot = lab.simulate_scenarios(cfg_hot)
         r_ref = lab.simulate_scenarios(cfg_ref)
-        self.assertLessEqual(r_hot.iloc[0]["retention_pct_simulated"], r_ref.iloc[0]["retention_pct_simulated"])
+        hot_day = r_hot.loc[r_hot["day"] == 7, "retention_pct_simulated"].iloc[0]
+        ref_day = r_ref.loc[r_ref["day"] == 7, "retention_pct_simulated"].iloc[0]
+        self.assertLess(hot_day, ref_day)
+
+    def test_simulator_applies_explicit_multipliers(self):
+        cfg = lab.default_simulation_config()
+        cfg.update({
+            "reference_half_life_days": 10.0,
+            "activation_energy_kj_mol": 40.0,
+            "reference_temperature_c": 25.0,
+            "initial_retention_pct": 100.0,
+            "days": [0, 5],
+            "scenarios": [{
+                "scenario_id": "FACTORS", "label": "explicit factors", "temperature_c": 25.0,
+                "pH_factor": 1.5, "light_factor": 2.0, "oxygen_factor": 0.5,
+                "packaging_factor": 0.8,
+            }],
+        })
+        result = lab.simulate_scenarios(cfg)
+        expected_k = math.log(2) / 10.0 * 1.5 * 2.0 * 0.5 * 0.8
+        self.assertAlmostEqual(result["combined_factor"].iloc[0], 1.2, places=12)
+        self.assertTrue(result["k_per_day_simulated"].map(
+            lambda value: math.isclose(value, expected_k, rel_tol=1e-12)
+        ).all())
+        retention_day5 = result.loc[result["day"] == 5, "retention_pct_simulated"].iloc[0]
+        self.assertAlmostEqual(retention_day5, 100.0 * math.exp(-expected_k * 5), delta=1e-12)
 
     def test_simulator_units_and_limits(self):
         """Coerencia de unidades e limites."""
@@ -401,6 +440,38 @@ class TestSimulator(unittest.TestCase):
 
 class TestPublishedFixtures(unittest.TestCase):
     """Validar fixtures de referencia contra valores publicados."""
+
+    @staticmethod
+    def _normalize(value):
+        text = unicodedata.normalize("NFKD", str(value).strip().lower())
+        return "".join(char for char in text if not unicodedata.combining(char))
+
+    @classmethod
+    def _audit_key(cls, row):
+        return (
+            cls._normalize(row["study_id"]),
+            cls._normalize(row["doi"]),
+            cls._normalize(row["treatment_id"]),
+            float(row["time_value"]),
+            cls._normalize(row["time_unit"]),
+            cls._normalize(row["measurement"]),
+            cls._normalize(row["value_unit"]),
+        )
+
+    @classmethod
+    def _fixture_mismatches(cls, fixture, original):
+        source_rows = {}
+        for row in original:
+            key = cls._audit_key(row)
+            if key in source_rows:
+                raise AssertionError(f"Chave de auditoria duplicada na fonte preservada: {key}")
+            source_rows[key] = float(row["value"])
+        mismatches = []
+        for row in fixture:
+            key = cls._audit_key(row)
+            if key not in source_rows or float(row["value"]) != source_rows[key]:
+                mismatches.append(key)
+        return mismatches
 
     def test_lin_2023_half_life_consistency(self):
         """t1/2 = ln(2) / k para Lin et al. (2023), acido gallico 0,4%."""
@@ -433,21 +504,36 @@ class TestPublishedFixtures(unittest.TestCase):
         self.assertEqual(hl["unit"], "h")
         self.assertNotEqual(ph2["condition"], t40["condition"])
 
-    def test_hututui_fixture_exists(self):
-        """Fixture de auditoria Huțuțui et al. (2026) existe."""
-        fixture_path = FIXTURES_DIR / "hututui_2026_audit.csv"
-        self.assertTrue(fixture_path.exists())
-        df = pd.read_csv(fixture_path)
-        self.assertGreater(len(df), 0)
-        self.assertTrue((df["verification_status"] == "VERIFICATION_PENDING").all())
+    def test_hututui_fixture_matches_preserved_measurements_by_stable_key(self):
+        fixture = pd.read_csv(FIXTURES_DIR / "hututui_2026_audit.csv").to_dict("records")
+        original = pd.read_csv(
+            Path(__file__).resolve().parents[1] / "data" / "literature" /
+            "literature_measurements.csv"
+        ).to_dict("records")
+        self.assertEqual(len(fixture), 18)
+        self.assertEqual(self._fixture_mismatches(fixture, original), [])
+        self.assertEqual(set(pd.DataFrame(fixture)["verification_status"]), {"VERIFICATION_PENDING"})
 
-    def test_muhamad_fixture_exists(self):
-        """Fixture de auditoria Muhamad et al. (2022) existe."""
-        fixture_path = FIXTURES_DIR / "muhamad_2022_audit.csv"
-        self.assertTrue(fixture_path.exists())
-        df = pd.read_csv(fixture_path)
-        self.assertGreater(len(df), 0)
-        self.assertTrue((df["verification_status"] == "VERIFICATION_PENDING").all())
+    def test_muhamad_fixture_matches_preserved_measurements_by_stable_key(self):
+        fixture = pd.read_csv(FIXTURES_DIR / "muhamad_2022_audit.csv").to_dict("records")
+        original = pd.read_csv(
+            Path(__file__).resolve().parents[1] / "data" / "literature" /
+            "literature_measurements.csv"
+        ).to_dict("records")
+        self.assertEqual(len(fixture), 21)
+        self.assertEqual(self._fixture_mismatches(fixture, original), [])
+        self.assertEqual(set(pd.DataFrame(fixture)["verification_status"]), {"VERIFICATION_PENDING"})
+
+    def test_stable_key_comparison_detects_a_changed_source_value(self):
+        fixture = pd.read_csv(FIXTURES_DIR / "hututui_2026_audit.csv").to_dict("records")
+        original = pd.read_csv(
+            Path(__file__).resolve().parents[1] / "data" / "literature" /
+            "literature_measurements.csv"
+        ).to_dict("records")
+        fixture[0]["value"] = float(fixture[0]["value"]) + 1.0
+        mismatches = self._fixture_mismatches(fixture, original)
+        self.assertEqual(len(mismatches), 1)
+        self.assertEqual(mismatches[0][2], "p4")
 
     def test_falcioni_method_reference(self):
         """Falcioni et al. (2022) e referencia metodologica apenas."""
@@ -455,6 +541,336 @@ class TestPublishedFixtures(unittest.TestCase):
         self.assertTrue(fixture_path.exists())
         content = fixture_path.read_text(encoding="utf-8")
         self.assertIn("referencia metodologica apenas", content)
+
+    def test_literature_pending_status_is_validated_filtered_and_preserved(self):
+        root = Path(__file__).resolve().parents[1]
+        with self.assertWarnsRegex(UserWarning, "excluídos da análise aprovada"):
+            _, approved, _ = lab.validate_literature_data(root)
+        self.assertTrue(approved.empty)
+        with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
+            _, exploratory, _ = lab.validate_literature_data(root, include_pending=True)
+        self.assertEqual(len(exploratory), 39)
+        self.assertEqual(set(exploratory["verification_status"]), {"VERIFICATION_PENDING"})
+        with self.assertWarnsRegex(UserWarning, "exploratório inclui"):
+            fits = lab.fit_literature_kinetics(exploratory, include_pending=True)
+        self.assertGreater(len(fits), 0)
+        self.assertEqual(set(fits["verification_status"]), {"VERIFICATION_PENDING"})
+        self.assertTrue(lab.fit_literature_kinetics(approved).empty)
+
+    def test_kinetic_reproduction_uses_generic_time_units_and_pending_status(self):
+        report = pd.read_csv(
+            Path(__file__).resolve().parents[1] / "reports" / "validation" /
+            "kinetic_reproduction.csv"
+        )
+        month_rows = report.loc[report["time_unit"].str.casefold().isin(["mes", "mês", "months"])]
+        self.assertGreater(len(month_rows), 0)
+        self.assertTrue(month_rows["k_estimated_per_time_unit"].notna().all())
+        self.assertNotIn("k_estimated_day_minus1", report.columns)
+        self.assertNotIn("t_half_estimated_days", report.columns)
+        self.assertEqual(set(month_rows["verification_status"]), {"VERIFICATION_PENDING"})
+
+
+class TestLiteratureKineticModelComparison(unittest.TestCase):
+    def test_model_fits_recover_deterministic_parameters(self):
+        times = [0, 1, 2, 3, 4, 5]
+        initial_concentration = 120.0
+        zero_order_rate = 4.0
+        first_order_rate = 0.2
+        second_order_rate = 0.002
+        cases = [
+            (
+                "zero_order",
+                [initial_concentration - zero_order_rate * time for time in times],
+                zero_order_rate,
+            ),
+            (
+                "first_order",
+                [initial_concentration * math.exp(-first_order_rate * time) for time in times],
+                first_order_rate,
+            ),
+            (
+                "second_order",
+                [
+                    initial_concentration
+                    / (1 + second_order_rate * initial_concentration * time)
+                    for time in times
+                ],
+                second_order_rate,
+            ),
+        ]
+
+        for model, values, expected_rate in cases:
+            with self.subTest(model=model):
+                fit = lab._fit_kinetic_model(model, times, values)
+                self.assertAlmostEqual(fit["initial_concentration"], initial_concentration, places=6)
+                self.assertAlmostEqual(fit["rate_parameter_value"], expected_rate, places=7)
+                self.assertLess(fit["rmse"], 1e-6)
+
+    def test_first_order_fit_selects_best_solution_after_saturated_start(self):
+        times = [1.0, 5.0, 10.0]
+        values = [74.273, 44.663, 38.482]
+        original_curve_fit = lab.curve_fit
+        starting_points = []
+        candidate_sse = []
+
+        def track_curve_fit(*args, **kwargs):
+            starting_points.append(tuple(kwargs["p0"]))
+            result = original_curve_fit(*args, **kwargs)
+            predictions = args[0](args[1], *result[0])
+            candidate_sse.append(sum((observed - predicted) ** 2
+                                     for observed, predicted in zip(args[2], predictions)))
+            return result
+
+        with patch.object(lab, "curve_fit", side_effect=track_curve_fit):
+            fit = lab._fit_kinetic_model("first_order", times, values)
+
+        self.assertGreaterEqual(len(starting_points), 3)
+        self.assertTrue(all(math.isfinite(value) for point in starting_points for value in point))
+        self.assertTrue(
+            any(rate > 1.0 for _, rate in starting_points),
+            "Expected a deterministic high-rate start that can reproduce the saturated fit.",
+        )
+        self.assertAlmostEqual(fit["sse"], min(candidate_sse), places=8)
+        self.assertLess(fit["rmse"], 10.0)
+
+    def test_comparison_preserves_source_status_conditions_and_time_units(self):
+        root = Path(__file__).resolve().parents[1]
+        with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
+            studies, measurements, _ = lab.validate_literature_data(root, include_pending=True)
+        with self.assertWarnsRegex(UserWarning, "comparação cinética exploratória inclui"):
+            comparison = lab.compare_literature_kinetic_models(
+                measurements, studies, include_pending=True
+            )
+
+        self.assertEqual(len(comparison), 27)
+        self.assertEqual(set(comparison["model"]), {"zero_order", "first_order", "second_order"})
+        self.assertEqual(set(comparison["verification_status"]), {"VERIFICATION_PENDING"})
+        self.assertTrue(comparison["data_origin"].eq("PUBLISHED_ARTICLE").all())
+        self.assertTrue(comparison["citation"].notna().all())
+        self.assertTrue(comparison["title"].notna().all())
+        self.assertTrue(comparison["source_url"].str.startswith("https://").all())
+        self.assertTrue(comparison["source_location"].notna().all())
+        self.assertTrue(comparison["doi"].notna().all())
+        self.assertTrue(comparison["uncertainty_status"].eq(
+            "NOT_ESTIMATED_NO_INDEPENDENT_REPLICATES"
+        ).all())
+        self.assertTrue(comparison["uncertainty_recommendation"].str.contains(
+            "bootstrap", case=False
+        ).all())
+        self.assertTrue(
+            comparison.groupby(["study_id", "treatment_id"], dropna=False).size().eq(3).all()
+        )
+        self.assertTrue(
+            comparison["predicted_values_json"].map(
+                lambda text: len(json.loads(text))
+            ).eq(comparison["n_observations"]).all()
+        )
+
+        study_a = comparison.loc[comparison["study_id"].eq("STUDY_A")]
+        study_b = comparison.loc[comparison["study_id"].eq("STUDY_B")]
+        self.assertEqual(set(study_a["n_timepoints"]), {3})
+        self.assertTrue(study_a["aicc"].isna().all())
+        self.assertEqual(set(study_a["model_selection_status"]),
+                         {"INSUFFICIENT_SAMPLE_SIZE_FOR_AICC"})
+        self.assertEqual(set(study_b["time_unit"]), {"mês"})
+        self.assertEqual(set(study_b["n_timepoints"]), {7})
+        self.assertTrue(study_b["aicc"].notna().all())
+        self.assertEqual(set(study_b["model_selection_status"]),
+                         {"DESCRIPTIVE_AICC_IID_ASSUMPTION_ONLY"})
+        self.assertTrue(comparison["extrapolation_policy"].eq("NONE_WITHIN_OBSERVED_INTERVAL").all())
+        self.assertTrue(comparison["fit_time_min"].le(comparison["fit_time_max"]).all())
+
+    def test_pending_series_are_excluded_from_default_comparison(self):
+        root = Path(__file__).resolve().parents[1]
+        with self.assertWarnsRegex(UserWarning, "excluídos da análise aprovada"):
+            studies, measurements, _ = lab.validate_literature_data(root)
+        comparison = lab.compare_literature_kinetic_models(measurements, studies)
+
+        self.assertTrue(comparison.empty)
+        self.assertIn("verification_status", comparison.columns)
+        self.assertIn("source_location", comparison.columns)
+
+    def test_conditional_parameter_intervals_and_three_point_insufficiency(self):
+        times_7 = list(map(float, range(7)))
+        values_7 = [10.1, 9.3, 9.2, 8.3, 8.1, 7.3, 7.2]
+        prediction_7 = [10.0 - 0.5 * time for time in times_7]
+        times_3 = [1.0, 5.0, 10.0]
+        values_3 = [74.273, 44.663, 38.482]
+        rows = [
+            {
+                "study_id": "STUDY_B",
+                "treatment_id": "SEVEN_POINTS",
+                "model": "zero_order",
+                "initial_concentration_fit": 10.0,
+                "rate_parameter_value": 0.5,
+                "n_observations": 7,
+                "time_unit": "mes",
+                "verification_status": "VERIFICATION_PENDING",
+                "observed_times_json": json.dumps(times_7),
+                "observed_values_json": json.dumps(values_7),
+                "predicted_values_json": json.dumps(prediction_7),
+            },
+            {
+                "study_id": "STUDY_A",
+                "treatment_id": "THREE_POINTS",
+                "model": "first_order",
+                "initial_concentration_fit": 71.59,
+                "rate_parameter_value": 0.08,
+                "n_observations": 3,
+                "time_unit": "dia",
+                "verification_status": "VERIFICATION_PENDING",
+                "observed_times_json": json.dumps(times_3),
+                "observed_values_json": json.dumps(values_3),
+                "predicted_values_json": json.dumps([70.0, 52.0, 32.0]),
+            },
+        ]
+
+        report = lab.estimate_literature_kinetic_parameter_uncertainty(pd.DataFrame(rows))
+        seven = report.loc[report["treatment_id"].eq("SEVEN_POINTS")].iloc[0]
+        three = report.loc[report["treatment_id"].eq("THREE_POINTS")].iloc[0]
+
+        self.assertEqual(seven["parameter_uncertainty_status"],
+                         "EXPLORATORY_CONDITIONAL_INTERVALS")
+        self.assertEqual(seven["parameter_residual_degrees_of_freedom"], 5)
+        self.assertAlmostEqual(seven["initial_concentration_ci_lower"], 9.6325904564, places=8)
+        self.assertAlmostEqual(seven["initial_concentration_ci_upper"], 10.3674095436, places=8)
+        self.assertAlmostEqual(seven["rate_parameter_ci_lower"], 0.3980989270, places=8)
+        self.assertAlmostEqual(seven["rate_parameter_ci_upper"], 0.6019010730, places=8)
+        self.assertIn("independent residuals", seven["parameter_uncertainty_assumptions"])
+        self.assertEqual(three["parameter_uncertainty_status"],
+                         "INSUFFICIENT_FOR_ROBUST_MODEL_SELECTION")
+        self.assertEqual(three["parameter_residual_degrees_of_freedom"], 1)
+        self.assertTrue(pd.isna(three["rate_parameter_ci_lower"]))
+        self.assertTrue(pd.isna(three["rate_parameter_ci_upper"]))
+        self.assertEqual(set(report["verification_status"]),
+                         {"VERIFICATION_PENDING"})
+        self.assertEqual(set(report["time_unit"]), {"mes", "dia"})
+
+    def test_simulated_concentration_intervals_distinguish_mean_and_individual(self):
+        times = list(map(float, range(7)))
+        initial = 100.0
+        rate = 0.065
+        predictions = [initial * math.exp(-rate * time) for time in times]
+        values = [
+            prediction + residual
+            for prediction, residual in zip(predictions, [0.4, -0.6, 0.2, 0.5, -0.3, -0.4, 0.2])
+        ]
+        comparison = pd.DataFrame([{
+            "study_id": "STUDY_B",
+            "treatment_id": "SEVEN_POINTS",
+            "model": "first_order",
+            "initial_concentration_fit": initial,
+            "rate_parameter_value": rate,
+            "n_observations": len(times),
+            "fit_time_min": min(times),
+            "fit_time_max": max(times),
+            "time_unit": "mes",
+            "value_unit": "mg/L",
+            "verification_status": "VERIFICATION_PENDING",
+            "observed_times_json": json.dumps(times),
+            "observed_values_json": json.dumps(values),
+            "predicted_values_json": json.dumps(predictions),
+        }])
+
+        intervals = lab.estimate_literature_kinetic_concentration_intervals(
+            comparison, n_simulations=4000, random_seed=19
+        )
+
+        self.assertEqual(len(intervals), len(times))
+        self.assertEqual(intervals["time_value"].tolist(), times)
+        self.assertTrue(intervals["time_value"].between(0, 6).all())
+        mean_columns = ["mean_response_ci_lower", "mean_response_ci_upper"]
+        prediction_columns = [
+            "individual_observation_pi_lower", "individual_observation_pi_upper"
+        ]
+        self.assertTrue(np.isfinite(intervals[mean_columns].to_numpy()).all())
+        self.assertTrue(np.isfinite(intervals[prediction_columns].to_numpy()).all())
+        mean_width = (
+            intervals["mean_response_ci_upper"] - intervals["mean_response_ci_lower"]
+        )
+        prediction_width = (
+            intervals["individual_observation_pi_upper"]
+            - intervals["individual_observation_pi_lower"]
+        )
+        self.assertTrue((prediction_width > mean_width).all())
+        self.assertEqual(
+            set(intervals["concentration_uncertainty_status"]),
+            {"EXPLORATORY_CONDITIONAL_SIMULATION"},
+        )
+        self.assertEqual(set(intervals["verification_status"]), {"VERIFICATION_PENDING"})
+        self.assertTrue(intervals["concentration_interval_method"].str.contains(
+            "parametric", case=False
+        ).all())
+
+    def test_simulated_concentration_intervals_mark_three_points_insufficient(self):
+        times = [1.0, 5.0, 10.0]
+        values = [74.273, 44.663, 38.482]
+        comparison = pd.DataFrame([{
+            "study_id": "STUDY_A",
+            "treatment_id": "THREE_POINTS",
+            "model": "first_order",
+            "initial_concentration_fit": 75.0,
+            "rate_parameter_value": 0.08,
+            "n_observations": len(times),
+            "fit_time_min": min(times),
+            "fit_time_max": max(times),
+            "time_unit": "dia",
+            "value_unit": "mg/L",
+            "verification_status": "VERIFICATION_PENDING",
+            "observed_times_json": json.dumps(times),
+            "observed_values_json": json.dumps(values),
+            "predicted_values_json": json.dumps([75.0, 54.8, 33.7]),
+        }])
+
+        intervals = lab.estimate_literature_kinetic_concentration_intervals(
+            comparison, n_simulations=1000, random_seed=19
+        )
+
+        self.assertEqual(intervals["time_value"].tolist(), times)
+        self.assertEqual(
+            set(intervals["concentration_uncertainty_status"]),
+            {"INSUFFICIENT_FOR_CONDITIONAL_INTERVALS"},
+        )
+        interval_columns = [
+            "mean_response_ci_lower", "mean_response_ci_upper",
+            "individual_observation_pi_lower", "individual_observation_pi_upper",
+        ]
+        self.assertTrue(intervals[interval_columns].isna().all().all())
+        self.assertEqual(set(intervals["verification_status"]), {"VERIFICATION_PENDING"})
+
+    def test_simulation_marks_nonpositive_fitted_concentration_unavailable(self):
+        times = list(map(float, range(7)))
+        predictions = [10.0 - 2.0 * time for time in times]
+        comparison = pd.DataFrame([{
+            "study_id": "STUDY_B",
+            "treatment_id": "NONPOSITIVE_ZERO_ORDER",
+            "model": "zero_order",
+            "initial_concentration_fit": 10.0,
+            "rate_parameter_value": 2.0,
+            "n_observations": len(times),
+            "fit_time_min": min(times),
+            "fit_time_max": max(times),
+            "time_unit": "mes",
+            "value_unit": "mg/L",
+            "verification_status": "VERIFICATION_PENDING",
+            "observed_times_json": json.dumps(times),
+            "observed_values_json": json.dumps([10.0, 8.0, 7.0, 5.0, 4.0, 2.0, 1.0]),
+            "predicted_values_json": json.dumps(predictions),
+        }])
+
+        intervals = lab.estimate_literature_kinetic_concentration_intervals(
+            comparison, n_simulations=1000, random_seed=19
+        )
+
+        self.assertEqual(
+            set(intervals["concentration_uncertainty_status"]),
+            {"MODEL_OUTSIDE_PHYSICAL_DOMAIN"},
+        )
+        self.assertTrue(intervals["mean_response_ci_lower"].isna().all())
+        self.assertTrue(intervals["individual_observation_pi_lower"].isna().all())
+        self.assertTrue(intervals["concentration_interval_limitations"].str.contains(
+            "nonpositive", case=False
+        ).all())
 
 
 if __name__ == "__main__":
