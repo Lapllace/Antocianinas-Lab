@@ -79,6 +79,30 @@ class TestAnalysis(unittest.TestCase):
         self.assertAlmostEqual(out.loc[0, "delta_e_cie76_vs_day0"], 0.0, places=5)
         self.assertGreater(out.loc[1, "delta_e_cie76_vs_day0"], 0.0)
 
+    def test_srgb_to_cielab_reference_values(self):
+        # Branco sRGB: L* = 100, a* ~ 0, b* ~ 0 sob D65.
+        l_white, a_white, b_white = lab.srgb_to_cielab(255, 255, 255)
+        self.assertAlmostEqual(l_white, 100.0, places=3)
+        self.assertAlmostEqual(a_white, 0.0, delta=0.05)
+        self.assertAlmostEqual(b_white, 0.0, delta=0.05)
+
+        # Preto sRGB: origem do espaco CIELAB.
+        l_black, a_black, b_black = lab.srgb_to_cielab(0, 0, 0)
+        self.assertAlmostEqual(l_black, 0.0, places=6)
+        self.assertAlmostEqual(a_black, 0.0, places=6)
+        self.assertAlmostEqual(b_black, 0.0, places=6)
+
+        # Vermelho sRGB puro sob D65: valores de referencia CIE (aprox.).
+        l_red, a_red, b_red = lab.srgb_to_cielab(255, 0, 0)
+        self.assertAlmostEqual(l_red, 53.2408, delta=0.05)
+        self.assertAlmostEqual(a_red, 80.0925, delta=0.1)
+        self.assertAlmostEqual(b_red, 67.2032, delta=0.1)
+
+        # Entradas fora de faixa retornam nulo em vez de estimar.
+        for invalid in [(256, 0, 0), (-1, 0, 0), (None, 0, 0)]:
+            l_val, a_val, b_val = lab.srgb_to_cielab(*invalid)
+            self.assertTrue(math.isnan(l_val) and math.isnan(a_val) and math.isnan(b_val))
+
     def test_simulation_is_separate_and_temperature_changes_rate(self):
         cfg = {
             "reference_temperature_c": 25.0,
@@ -232,6 +256,15 @@ class TestAnalysis(unittest.TestCase):
                 "notes": "Test measurement"
             }])
             measurements.to_csv(lit_dir / "literature_measurements.csv", index=False)
+            pd.DataFrame([{
+                "study_id": "TEST_STUDY", "doi": "10.1234/test", "treatment_id": "T1",
+                "time_value": 0, "time_unit": "dia", "measurement": "Anthocyanin",
+                "value_unit": "mg/L", "verification_status": "VERIFICATION_PENDING",
+                "verified_source_location": "", "reviewed_on": "", "reviewer": "",
+                "verification_notes": "Local fixture sem revisão primária.",
+            }], columns=lab.LITERATURE_STATUS_COLUMNS).to_csv(
+                lit_dir / "literature_verification_status.csv", index=False
+            )
             
             evidence = pd.DataFrame([{
                 "study_id": "TEST_STUDY",
@@ -264,10 +297,14 @@ class TestAnalysis(unittest.TestCase):
             evidence.to_csv(lit_dir / "literature_evidence.csv", index=False)
             
             # Verify literature data loads correctly
-            studies_df, measurements_df, evidence_df = lab.validate_literature_data(root)
+            with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
+                studies_df, measurements_df, evidence_df = lab.validate_literature_data(
+                    root, include_pending=True
+                )
             self.assertEqual(len(studies_df), 1)
             self.assertEqual(len(measurements_df), 1)
             self.assertEqual(len(evidence_df), 1)
+            self.assertEqual(measurements_df.iloc[0]["verification_status"], "VERIFICATION_PENDING")
             
             # Verify literature data is in separate directory
             self.assertTrue((root / "data" / "literature").exists())
@@ -348,15 +385,25 @@ class TestAnalysis(unittest.TestCase):
 
     def test_project_literature_sources_are_complete_and_preserve_reported_values(self):
         root = Path(__file__).resolve().parents[1]
-        studies, measurements, evidence = lab.validate_literature_data(root)
+        with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
+            studies, measurements, evidence = lab.validate_literature_data(root, include_pending=True)
 
-        self.assertEqual(len(studies), 5)
+        self.assertEqual(len(studies), 6)
         self.assertEqual(len(measurements), 39)
-        self.assertEqual(set(studies["study_id"]), {"STUDY_A", "STUDY_B", "STUDY_C", "STUDY_D", "STUDY_E"})
+        self.assertEqual(
+            set(studies["study_id"]),
+            {"STUDY_A", "STUDY_B", "STUDY_C", "STUDY_D", "STUDY_E", "STUDY_F"},
+        )
+        # STUDY_F (Muhamad et al. 2023) e registro bibliografico separado,
+        # relacionado a STUDY_B como possivel sobreposicao; nao leva observacoes.
+        study_f = studies.loc[studies["study_id"] == "STUDY_F"]
+        self.assertEqual(len(study_f), 1)
+        self.assertEqual(study_f.iloc[0]["doi"], "10.26656/fr.2017.6(S2).030")
         self.assertTrue(measurements["source_url"].str.startswith("https://").all())
         self.assertTrue(measurements["source_location"].str.strip().ne("").all())
         self.assertTrue(measurements["data_origin"].eq("PUBLISHED_ARTICLE").all())
         self.assertTrue(measurements["reported_or_calculated"].eq("reported").all())
+        self.assertTrue(measurements["verification_status"].eq("VERIFICATION_PENDING").all())
         self.assertTrue(measurements["standard_deviation"].isna().all())
 
         study_a = measurements.loc[measurements["study_id"] == "STUDY_A"]
@@ -427,7 +474,8 @@ class TestAnalysis(unittest.TestCase):
             root = Path(temp_dir)
             lit_dir = root / "data" / "literature"
             lit_dir.mkdir(parents=True)
-            for filename in ("literature_studies.csv", "literature_measurements.csv", "literature_evidence.csv"):
+            for filename in ("literature_studies.csv", "literature_measurements.csv",
+                             "literature_evidence.csv", "literature_verification_status.csv"):
                 shutil.copyfile(source / filename, lit_dir / filename)
 
             measurements_path = lit_dir / "literature_measurements.csv"
@@ -451,8 +499,10 @@ class TestAnalysis(unittest.TestCase):
 
     def test_literature_kinetics_fit_each_treatment_without_mixing_units(self):
         root = Path(__file__).resolve().parents[1]
-        _, measurements, _ = lab.validate_literature_data(root)
-        kinetics = lab.fit_literature_kinetics(measurements)
+        with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
+            _, measurements, _ = lab.validate_literature_data(root, include_pending=True)
+        with self.assertWarnsRegex(UserWarning, "exploratório inclui"):
+            kinetics = lab.fit_literature_kinetics(measurements, include_pending=True)
 
         self.assertEqual(len(kinetics), 9)
         self.assertEqual(set(kinetics["treatment_id"]), {"P2", "P4", "P8", "P9", "P13", "P14",
@@ -462,6 +512,7 @@ class TestAnalysis(unittest.TestCase):
         self.assertTrue(kinetics["data_origin"].eq("PUBLISHED_ARTICLE").all())
         self.assertTrue(kinetics["reported_or_calculated"].eq("calculated_from_published_series").all())
         self.assertTrue(kinetics["source_url"].str.startswith("https://").all())
+        self.assertTrue(kinetics["verification_status"].eq("VERIFICATION_PENDING").all())
 
     def test_experimental_plan_equalizes_initial_ph_and_separates_outcomes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

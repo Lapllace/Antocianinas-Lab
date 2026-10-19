@@ -1,0 +1,15 @@
+check,value,status
+lines_processed_measurements,39,ok
+lines_processed_evidence_rows,15,ok
+rows_harmonized,54,ok
+exact_duplicate_groups,0,ok
+empty_source_locators,0,warning
+missing_standard_deviation,31,warning
+missing_replicate_type,33,ok
+normalized_formula_nonempty,0,info
+evidence_class_quantitative_measurements,43,ok
+evidence_class_published_kinetic_parameters,8,ok
+evidence_class_qualitative_narratives,3,ok
+unique_observation_ids,54,ok
+unique_source_record_ids,54,ok
+supplement_applied,21,info

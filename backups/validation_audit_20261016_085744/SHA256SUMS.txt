@@ -1,0 +1,22 @@
+# Registro de hashes SHA-256 — FASE A (Auditoria e proteção)
+# Data: 2026-10-16
+# Repositorio: anthocyanin-liquid-study-v2, branch feature/scientific-skills-integration
+# Estes hashes sao a linha de referencia. Nenhum arquivo em data/raw/ nem em
+# data/literature/ deve ser alterado sem correcao documentada e aprovada.
+
+EF02F742427FB35D09E9609F3658A59EF52EBECD799DB704840A0AE8D64D4066  anthocyanin_lab.py
+6946FC107EBAA87D505DA0CA16A428787F8152F9B85143BEA7CC3968CF9301F8  anthocyanin_persistence.py
+429F09973A09829621DC05EECCCB22C9D3787A60F5616AF272A1532C37C68B19  data/literature/literature_studies.csv
+159CE435A35A1BE17BDCB6488F41D7CC83E103B06308EC40EFAE84EBBE2ED351  data/literature/literature_measurements.csv
+F4728FB936B5F4335A1CED03D4E8875E1B5AF781AE311FCEDB0CD152C0ED1DE4  data/literature/literature_evidence.csv
+D50553ED0EBD1299F177122DF02C8BA5B8B72E7C625AF23EFC833A862F126C6A  data/raw/stability_measurements.csv
+EE254B046FD3DE2176F6ABDE60286237CA6F6B88E374E17DDCBFF9F79B1E7BFB  data/raw/color_measurements.csv
+4007F36110B71CFE5A97470F566C5CC6F7351F5A8B46D4F4217BEC34B62B6345  data/raw/ml_observations.csv
+
+# Observacoes:
+# - Dados brutos (data/raw/) contêm apenas cabecalho: nenhum dado de laboratorio
+#   foi coletado ainda.
+# - CSVs bibliograficos (data/literature/) estao marcados com source_location
+#   pendente de conferencia (VERIFICATION_PENDING).
+# - Simulacao em data/simulation/ nao foi incluida porque nao sera modificada
+#   nesta validacao.

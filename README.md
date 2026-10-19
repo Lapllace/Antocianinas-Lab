@@ -17,7 +17,7 @@ O `init` cria modelos CSV laboratoriais em `data/raw/` (incluindo `ml_observatio
 
 ## 1. Analisar dados experimentais reais
 
-Preencha `data/raw/stability_measurements.csv` com leituras reais do UV-Vis pelo método diferencial de pH. Preencha `data/raw/color_measurements.csv` com os valores RGB obtidos sob iluminação controlada e, se houver um método válido, os valores CIELAB. Não invente medições; deixe em branco dados que ainda não foram obtidos.
+Preencha `data/raw/stability_measurements.csv` com leituras reais do UV-Vis pelo método diferencial de pH. Preencha `data/raw/color_measurements.csv` com os valores RGB obtidos sob iluminação controlada e, se houver um método válido, os valores CIELAB. O código calcula HSV a partir dos canais RGB e calcula ΔE CIE76 a partir de valores L*, a*, b* fornecidos externamente; ele não converte RGB em CIELAB. Não invente medições; deixe em branco dados que ainda não foram obtidos.
 
 ```powershell
 python anthocyanin_lab.py analyze --dir .
@@ -108,11 +108,24 @@ As três bases `data/literature/literature_studies.csv`, `literature_measurement
 
 ```powershell
 python anthocyanin_lab.py literature --dir .
+# Somente exploração; inclui linhas bibliográficas ainda não verificadas e emite aviso
+python anthocyanin_lab.py literature --dir . --include-pending
 ```
 
-O comando valida colunas, unidades temporais, unidades de teor de antocianinas, proveniência, IDs e valores; cria `data/literature/processed/literature_report.html`, curvas por matriz/unidade/tratamento, tabela de retenção derivada e ajustes exploratórios. A retenção usa o primeiro tempo efetivamente medido em cada série (que pode não ser o dia zero); a fórmula, o valor e o tempo de referência ficam registrados como calculados. O ajuste de primeira ordem só usa pelo menos três tempos distintos da mesma série compatível, não converte horas em dias, e informa resíduos e R². Não digitaliza gráficos, interpola pontos ausentes nem combina automaticamente resultados entre matriz, unidade ou tratamento.
+O status de conferência fica em `data/literature/literature_verification_status.csv`, um manifesto lateral com chave por estudo, DOI, tratamento, tempo/unidade, variável e unidade do valor. Os três CSVs bibliográficos originais não são alterados. O status usa os estados validados por código `VERIFIED`, `VERIFICATION_PENDING` e `REJECTED`; a aprovação requer localização primária específica, data de revisão ISO e revisor identificado. O comando padrão exclui pendentes e rejeitados; `--include-pending` permite análise exploratória dos pendentes e imprime um aviso. Status é preservado nas tabelas de retenção e nos ajustes cinéticos; somente registros `VERIFIED` são benchmarks aprovados.
+
+O comando valida colunas, unidades temporais, unidades de teor de antocianinas, proveniência, IDs, valores e cobertura/integridade do manifesto; cria `data/literature/processed/literature_report.html`, curvas por matriz/unidade/tratamento, tabela de retenção derivada, ajustes exploratórios e `literature_kinetic_model_comparison.csv`. A retenção usa o primeiro tempo efetivamente medido em cada série (que pode não ser o dia zero); a fórmula, o valor e o tempo de referência ficam registrados como calculados. O ajuste de primeira ordem existente usa OLS de ln(valor) versus tempo e informa resíduos e R². A comparação adicional ajusta modelos de ordem zero, primeira e segunda ordem por mínimos quadrados não lineares na escala original; registra parâmetros com unidades, observações, previsões apenas nos tempos observados, resíduos e RMSE/MAE/SSE. Para séries com três tempos, AICc não é calculado; para séries maiores é apenas descritivo sob hipótese de resíduos Gaussianos iid, não uma seleção confiável quando os tempos são dependentes. A análise também grava `literature_kinetic_parameter_uncertainty.csv`: para séries com sete observações, apresenta intervalos de Wald t condicionais à covariância local do ajuste (gl = n - 2), assumindo resíduos Gaussianos, homoscedásticos e independentes e aproximação linear local. São intervalos exploratórios dos parâmetros, não intervalos de previsão calibrados; dependência temporal, ausência de lotes independentes, falta de validação externa e status bibliográfico pendente limitam sua interpretação. Séries com três pontos são marcadas como insuficientes para intervalos ou seleção robusta de modelos. Para incerteza inferencial defensável, são necessários lotes independentes; tempos do mesmo lote não devem ser reamostrados como observações independentes. A análise não converte meses em dias, extrapola, digitaliza gráficos, interpola pontos ausentes nem combina automaticamente resultados entre matriz, unidade ou tratamento.
 
 Os registros inicialmente incluídos cobrem os estudos A–E informados. Localizações exatas de tabelas/páginas ainda não confirmadas estão marcadas como pendentes; desvios-padrão, replicatas e condições não informados permanecem vazios. Confirme as fontes no texto integral antes de usar os resultados como valores verificados.
+
+Para conferir os hashes de referência arquivo por arquivo (em vez de calcular somente o hash do próprio manifesto), execute:
+
+```powershell
+.\tools\verify_validation_hashes.ps1
+```
+
+Cada linha informa `MATCH` ou `MISMATCH`; alterações intencionais em código também diferem do backup original e devem ser avaliadas separadamente dos dados científicos protegidos.
+Os arquivos originais de laboratório e literatura devem retornar `MATCH`. Um `MISMATCH` em código intencionalmente alterado deve ser documentado como tal; não atualize o manifesto para fazê-lo desaparecer.
 
 ## Planejamento para ácido gálico
 

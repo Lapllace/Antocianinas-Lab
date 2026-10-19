@@ -22,12 +22,16 @@ import colorsys
 import html
 import json
 import math
+import shutil
 import sys
+import warnings
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import curve_fit
+from scipy.stats import t as student_t
 
 MW_C3G_G_MOL = 449.2
 EPSILON_C3G_L_MOL_CM = 26900.0
@@ -53,6 +57,84 @@ LITERATURE_COLUMNS = [
     "oxygen_condition", "package_material", "time_value", "time_unit",
     "measurement", "value", "standard_deviation", "value_unit",
     "replicate_count", "data_origin", "reported_or_calculated", "notes",
+]
+LITERATURE_STATUS_COLUMNS = [
+    "study_id", "doi", "treatment_id", "time_value", "time_unit", "measurement",
+    "value_unit", "verification_status", "verified_source_location", "reviewed_on",
+    "reviewer", "verification_notes",
+]
+LITERATURE_STATUS_KEY = [
+    "study_id", "doi", "treatment_id", "time_value", "time_unit", "measurement", "value_unit",
+]
+LITERATURE_VERIFICATION_STATUSES = {"VERIFIED", "VERIFICATION_PENDING", "REJECTED"}
+
+# --- Integracao Fase 3: classes de evidencia, visoes e base harmonizada ---
+LITERATURE_EVIDENCE_CLASSES = {
+    "QUANTITATIVE_MEASUREMENT",
+    "PUBLISHED_KINETIC_PARAMETER",
+    "QUALITATIVE_NARRATIVE",
+}
+LITERATURE_VIEWS = ("verified", "pending", "rejected", "combined")
+VIEW_STATUS_SETS = {
+    "verified": frozenset({"VERIFIED"}),
+    "pending": frozenset({"VERIFICATION_PENDING"}),
+    "rejected": frozenset({"REJECTED"}),
+    "combined": frozenset({"VERIFIED", "VERIFICATION_PENDING"}),
+}
+VIEW_DIR_NAMES = {
+    "verified": "verified",
+    "pending": "pending_exploratory",
+    "rejected": "rejected",
+    "combined": "combined_exploratory",
+}
+HARMONIZED_CATALOG_RELATIVE = Path(
+    "data/literature/processed/harmonized/harmonized_measurements.csv"
+)
+HARMONIZED_REQUIRED_COLUMNS = [
+    "execution_id", "generated_on_utc", "observation_id", "source_record_id",
+    "study_id", "treatment_id", "measurement", "value_original", "unit_original",
+    "time_value_original", "time_unit_original", "doi", "source_url",
+    "source_version", "source_locator", "source_locator_class", "provenance_class",
+    "verification_status", "verification_note", "matrix_type", "species",
+    "extraction_method", "solvent", "solvent_composition", "additive",
+    "additive_concentration_pct", "pH", "temperature_c", "light_condition",
+    "oxygen_condition", "package_material", "storage_conditions",
+    "measurement_name", "standard_deviation", "replicate_count", "replicate_type",
+    "normalization_formula", "normalized_value", "normalized_unit",
+    "comparability_group", "exclusion_reason", "evidence_class", "evidence_type",
+    "evidence_text", "k_value", "k_unit", "half_life", "half_life_unit", "formula",
+    "data_origin", "reported_or_calculated", "notes",
+]
+ANALYSIS_MEASUREMENT_COLUMNS = [
+    "study_id", "treatment_id", "source_url", "doi", "source_location", "matrix",
+    "measurement", "value", "value_unit", "time_value", "time_unit", "solvent",
+    "temperature_c", "light_condition", "oxygen_condition", "package_material",
+    "pH", "additive", "additive_concentration_pct", "data_origin",
+    "reported_or_calculated", "verification_status", "verification_note",
+    "observation_id", "source_record_id", "evidence_class", "provenance_class",
+    "comparability_group", "exclusion_reason", "standard_deviation",
+    "replicate_count", "notes",
+]
+SERIES_GROUP_KEYS = [
+    "study_id", "treatment_id", "matrix", "measurement", "value_unit", "time_unit",
+    "solvent", "temperature_c", "light_condition", "oxygen_condition",
+    "package_material", "pH", "additive", "additive_concentration_pct",
+]
+LITERATURE_FIT_COLUMNS = SERIES_GROUP_KEYS + [
+    "n_timepoints", "k_per_time_unit", "half_life_time_unit", "r_squared",
+    "residual_rmse_log", "residual_rmse_value", "fit_method", "data_origin",
+    "reported_or_calculated", "source_url", "doi", "source_location",
+    "verification_status", "fit_note",
+]
+LEGACY_OUTPUT_NAMES = [
+    "literature_measurements_with_retention.csv",
+    "literature_kinetics.csv",
+    "literature_kinetic_model_comparison.csv",
+    "literature_kinetic_parameter_uncertainty.csv",
+    "literature_kinetic_concentration_uncertainty.csv",
+    "literature_report.html",
+    "literature_time_series.png",
+    "literature_retention.png",
 ]
 
 LITERATURE_STUDY_COLUMNS = [
@@ -171,6 +253,7 @@ def make_templates(root: Path) -> None:
         "literature_studies.csv": LITERATURE_STUDY_COLUMNS,
         "literature_measurements.csv": LITERATURE_COLUMNS,
         "literature_evidence.csv": LITERATURE_EVIDENCE_COLUMNS,
+        "literature_verification_status.csv": LITERATURE_STATUS_COLUMNS,
     }
     for filename, columns in lit_files.items():
         path = literature / filename
@@ -222,12 +305,17 @@ def calculate_tac(frame: pd.DataFrame) -> pd.DataFrame:
     baseline_shared = valid_baseline.groupby(shared_keys)["tac_mg_c3g_L"].mean().rename("_baseline_shared")
     df = df.join(baseline_specific, on=keys)
     df = df.join(baseline_shared, on=shared_keys)
-    df["day0_tac_mg_c3g_L"] = df["_baseline_specific"].combine_first(df["_baseline_shared"])
+    baseline = df["_baseline_specific"].combine_first(df["_baseline_shared"])
+    invalid_baseline = baseline.notna() & (baseline <= 0)
+    df["day0_tac_mg_c3g_L"] = baseline.mask(invalid_baseline)
     df = df.drop(columns=["_baseline_specific", "_baseline_shared"])
     df["retention_pct"] = 100.0 * df["tac_mg_c3g_L"] / df["day0_tac_mg_c3g_L"]
     df["qc_flag"] = ""
     df.loc[df["absorbance_difference"] < 0, "qc_flag"] = "A diferencial negativa: verificar branco, diluição e leitura"
-    df.loc[df["day0_tac_mg_c3g_L"].isna(), "qc_flag"] = "Sem baseline válida no dia 0 para este grupo"
+    df.loc[baseline.isna(), "qc_flag"] = "Sem baseline válida no dia 0 para este grupo"
+    df.loc[invalid_baseline, "qc_flag"] = (
+        "Baseline nula ou negativa no dia 0; retenção não calculada"
+    )
     df.loc[df["retention_pct"] > 120, "qc_flag"] = (
         df.loc[df["retention_pct"] > 120, "qc_flag"].astype(str)
         .apply(lambda s: (s + "; " if s else "") + "retenção >120%: verificar variabilidade analítica")
@@ -240,23 +328,25 @@ def fit_kinetics(stability: pd.DataFrame) -> pd.DataFrame:
     records: list[dict] = []
     keys = ["batch_id", "formulation", "storage_condition"]
     for group_key, group in stability.groupby(keys, dropna=False):
-        valid = group.loc[(group["tac_mg_c3g_L"] > 0) & group["day"].notna()].copy()
-        # A shared day-0 aliquot may be labeled BASELINE. Add its mean as the
-        # common time-zero observation for this kinetic curve (not a new vial).
-        if not (valid["day"] == 0).any() and isinstance(group_key, tuple) and len(group_key) == 3:
+        valid = group.loc[
+            (group["tac_mg_c3g_L"] > 0) & group["day"].notna() & (group["day"] != 0)
+        ].copy()
+        if isinstance(group_key, tuple) and len(group_key) == 3:
             batch_val, formulation_val, condition_val = group_key
             baseline_pool = stability.loc[
                 (stability["batch_id"] == batch_val)
                 & (stability["formulation"] == formulation_val)
                 & (stability["day"] == 0)
-                & (stability["tac_mg_c3g_L"] > 0)
+                & stability["tac_mg_c3g_L"].notna()
             ]
             condition_baseline = baseline_pool.loc[baseline_pool["storage_condition"] == condition_val]
             use_base = condition_baseline if not condition_baseline.empty else baseline_pool
             if not use_base.empty:
                 base_row = use_base.iloc[[0]].copy()
+                base_row["tac_mg_c3g_L"] = use_base["tac_mg_c3g_L"].mean()
                 base_row["day"] = 0
-                valid = pd.concat([valid, base_row], ignore_index=True)
+                if base_row.iloc[0]["tac_mg_c3g_L"] > 0:
+                    valid = pd.concat([valid, base_row], ignore_index=True)
         daily = valid.groupby("day", as_index=False)["tac_mg_c3g_L"].mean().sort_values("day")
         row = dict(zip(keys, group_key if isinstance(group_key, tuple) else (group_key,)))
         row.update({"n_timepoints": int(daily["day"].nunique()), "k_per_day": np.nan,
@@ -318,6 +408,54 @@ def add_hsv_and_delta_e(frame: pd.DataFrame) -> pd.DataFrame:
     else:
         df["delta_e_cie76_vs_day0"] = np.nan
     return df
+
+
+def srgb_to_cielab(r: float, g: float, b: float) -> tuple:
+    """Converte RGB sRGB (0-255) para coordenadas CIELAB sob iluminante D65.
+
+    Implementa a conversao padrao sRGB (expansao de gamma) -> XYZ (primarias
+    CIE D65) -> CIELAB, conforme formulas CIE 1976.
+
+    Esta funcao cobre a lacuna RGB->CIELAB identificada no roadmap da Fase 5.
+    Ela NAO e aplicada automaticamente pelo pipeline: L*, a*, b* medidos
+    continuam sendo a unica origem aceita para ``delta_e_cie76_vs_day0``.
+    Derivar L*, a*, b* de RGB exige decisao explicita apos validacao contra
+    instrumento, e qualquer uso deve registrar a origem como derivada.
+
+    Retorna (nan, nan, nan) para entradas ausentes ou fora de [0, 255].
+    """
+    try:
+        values = (float(r), float(g), float(b))
+    except (TypeError, ValueError):
+        return (np.nan, np.nan, np.nan)
+    if any(np.isnan(v) or v < 0 or v > 255 for v in values):
+        return (np.nan, np.nan, np.nan)
+
+    def _to_linear(channel: float) -> float:
+        c = channel / 255.0
+        if c <= 0.04045:
+            return c / 12.92
+        return ((c + 0.055) / 1.055) ** 2.4
+
+    red_l, green_l, blue_l = (_to_linear(v) for v in values)
+    # Primarias sRGB / iluminante CIE D65.
+    x = 0.4124564 * red_l + 0.3575761 * green_l + 0.1804375 * blue_l
+    y = 0.2126729 * red_l + 0.7151522 * green_l + 0.0721750 * blue_l
+    z = 0.0193339 * red_l + 0.1191920 * green_l + 0.9503041 * blue_l
+
+    # Branco de referencia D65 (CIE, normalizado para 1.0).
+    xn, yn, zn = 0.95047, 1.00000, 1.08883
+
+    def _f(t: float) -> float:
+        if t > 0.008856:
+            return t ** (1.0 / 3.0)
+        return 7.787 * t + 16.0 / 116.0
+
+    fx, fy, fz = _f(x / xn), _f(y / yn), _f(z / zn)
+    l_star = 116.0 * fy - 16.0
+    a_star = 500.0 * (fx - fy)
+    b_star = 200.0 * (fy - fz)
+    return (l_star, a_star, b_star)
 
 
 def plot_retention(stability: pd.DataFrame, out_dir: Path) -> None:
@@ -583,14 +721,25 @@ def validate_simulation_config(cfg: dict) -> None:
     missing = [key for key in required_top if key not in cfg or cfg[key] is None]
     if missing:
         raise ValueError("Configuração de simulação incompleta: " + ", ".join(missing) + ". Edite data/config/simulation_parameters.json ou use --demo apenas para testar o fluxo.")
-    if float(cfg["reference_half_life_days"]) <= 0:
+    numeric_top = {
+        key: float(cfg[key])
+        for key in ("reference_temperature_c", "reference_half_life_days",
+                    "activation_energy_kj_mol", "initial_retention_pct")
+    }
+    for key, value in numeric_top.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{key} deve ser finito.")
+    if numeric_top["reference_half_life_days"] <= 0:
         raise ValueError("reference_half_life_days deve ser maior que zero.")
-    if float(cfg["activation_energy_kj_mol"]) < 0:
+    if numeric_top["activation_energy_kj_mol"] < 0:
         raise ValueError("activation_energy_kj_mol não pode ser negativa.")
-    if float(cfg["reference_temperature_c"]) <= -273.15:
+    if numeric_top["reference_temperature_c"] <= -273.15:
         raise ValueError("A temperatura de referência deve ser maior que o zero absoluto.")
+    if not 0 <= numeric_top["initial_retention_pct"] <= 100:
+        raise ValueError("initial_retention_pct deve estar entre 0 e 100.")
     days = cfg["days"]
-    if not isinstance(days, list) or not days or any(float(day) < 0 for day in days):
+    if (not isinstance(days, list) or not days
+            or any(not math.isfinite(float(day)) or float(day) < 0 for day in days)):
         raise ValueError("days deve ser uma lista não vazia de tempos não negativos.")
     if not isinstance(cfg["scenarios"], list) or not cfg["scenarios"]:
         raise ValueError("scenarios precisa conter pelo menos um cenário.")
@@ -599,12 +748,19 @@ def validate_simulation_config(cfg: dict) -> None:
         for key in ["scenario_id", "label", "temperature_c"]:
             if key not in scenario:
                 raise ValueError(f"Cenário {i} não contém o campo obrigatório {key}.")
-        if float(scenario["temperature_c"]) <= -273.15:
+        temperature = float(scenario["temperature_c"])
+        if not math.isfinite(temperature) or temperature <= -273.15:
             raise ValueError(f"Temperatura inválida no cenário {scenario['scenario_id']}.")
         for factor in factor_keys:
             value = float(scenario.get(factor, 1.0))
-            if value <= 0:
-                raise ValueError(f"O multiplicador {factor} deve ser maior que zero no cenário {scenario['scenario_id']}.")
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"O multiplicador {factor} deve ser finito e maior que zero "
+                    f"no cenário {scenario['scenario_id']}."
+                )
+        combined_factor = math.prod(float(scenario.get(key, 1.0)) for key in factor_keys)
+        if not math.isfinite(combined_factor):
+            raise ValueError(f"Produto de multiplicadores não finito no cenário {scenario['scenario_id']}.")
 
 
 def simulate_scenarios(cfg: dict) -> pd.DataFrame:
@@ -619,11 +775,16 @@ def simulate_scenarios(cfg: dict) -> pd.DataFrame:
     for scenario in cfg["scenarios"]:
         temp_c = float(scenario["temperature_c"])
         temp_k = temp_c + 273.15
-        arrhenius_factor = math.exp((-ea / gas_constant) * (1.0 / temp_k - 1.0 / t_ref))
+        exponent = (-ea / gas_constant) * (1.0 / temp_k - 1.0 / t_ref)
+        if not math.isfinite(exponent) or exponent > math.log(sys.float_info.max):
+            raise ValueError(f"Fator de Arrhenius não finito no cenário {scenario['scenario_id']}.")
+        arrhenius_factor = math.exp(exponent)
         modifiers = {key: float(scenario.get(key, 1.0)) for key in ["pH_factor", "light_factor", "oxygen_factor", "packaging_factor"]}
         modifier_total = math.prod(modifiers.values())
         k = k_ref * arrhenius_factor * modifier_total
-        half_life = math.log(2.0) / k if k > 0 else math.inf
+        if not math.isfinite(k) or k <= 0:
+            raise ValueError(f"A constante cinética simulada não é finita no cenário {scenario['scenario_id']}.")
+        half_life = math.log(2.0) / k
         for day in cfg["days"]:
             retention = initial * math.exp(-k * float(day))
             records.append({
@@ -1014,7 +1175,123 @@ def train_ml_model(root: Path, target: str = "retention_pct",
     print(f"Modelo exploratório salvo: {(out / f'model_{target}.joblib').resolve()}")
     print("AVISO: modelo exploratório; valide com novos lotes independentes antes de qualquer conclusão científica.")
 
-def validate_literature_data(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _literature_verification_key(row: pd.Series | dict) -> tuple:
+    def text(value: object) -> str:
+        return str(value).strip().casefold()
+
+    return (
+        text(row["study_id"]),
+        text(row["doi"]),
+        text(row["treatment_id"]),
+        float(row["time_value"]),
+        text(row["time_unit"]),
+        text(row["measurement"]),
+        text(row["value_unit"]),
+    )
+
+
+def _load_literature_verification_status(
+    lit_dir: Path, measurements: pd.DataFrame, include_pending: bool
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    status_path = lit_dir / "literature_verification_status.csv"
+    if not status_path.exists():
+        raise FileNotFoundError(
+            f"Manifesto de verificação ausente: {status_path}. "
+            "Crie o manifesto lateral; os CSVs bibliográficos originais não serão alterados."
+        )
+    status = pd.read_csv(status_path, dtype={"time_unit": "string"})
+    missing_columns = set(LITERATURE_STATUS_COLUMNS) - set(status.columns)
+    if missing_columns:
+        raise ValueError(
+            "Colunas obrigatórias ausentes em literature_verification_status.csv: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    if not status.empty:
+        status_values = status["verification_status"].astype("string").str.strip().str.upper()
+        if status_values.isna().any() or status_values.eq("").any():
+            raise ValueError("Todo registro do manifesto precisa de verification_status explícito.")
+        invalid_statuses = sorted(set(status_values) - LITERATURE_VERIFICATION_STATUSES)
+        if invalid_statuses:
+            raise ValueError(f"verification_status desconhecido no manifesto: {invalid_statuses}.")
+        status["verification_status"] = status_values
+
+    source_keys = [_literature_verification_key(row) for _, row in measurements.iterrows()]
+    status_keys = [_literature_verification_key(row) for _, row in status.iterrows()]
+    if len(set(source_keys)) != len(source_keys):
+        raise ValueError("Chave de verificação duplicada em literature_measurements.csv.")
+    if len(set(status_keys)) != len(status_keys):
+        raise ValueError("Chave duplicada em literature_verification_status.csv.")
+    source_key_set = set(source_keys)
+    status_key_set = set(status_keys)
+    missing_keys = source_key_set - status_key_set
+    extra_keys = status_key_set - source_key_set
+    if missing_keys or extra_keys:
+        raise ValueError(
+            f"Chaves do manifesto não correspondem às medições: "
+            f"{len(missing_keys)} ausentes e {len(extra_keys)} sem medição correspondente."
+        )
+
+    for _, row in status.loc[status["verification_status"] == "VERIFIED"].iterrows():
+        location = str(row["verified_source_location"]).strip()
+        if (not location or "pending" in location.casefold()
+                or "pendente" in location.casefold()):
+            raise ValueError("Registros VERIFIED exigem localização primária específica e confirmada.")
+        review_date = str(row["reviewed_on"]).strip()
+        if not review_date or pd.isna(pd.to_datetime(review_date, format="%Y-%m-%d", errors="coerce")):
+            raise ValueError("Registros VERIFIED exigem reviewed_on no formato ISO YYYY-MM-DD.")
+        if pd.isna(row["reviewer"]) or not str(row["reviewer"]).strip():
+            raise ValueError("Registros VERIFIED exigem reviewer identificado.")
+
+    status_by_key = {
+        key: row for key, (_, row) in zip(status_keys, status.iterrows())
+    }
+    annotated = measurements.copy()
+    annotated["verification_status"] = [
+        status_by_key[key]["verification_status"] for key in source_keys
+    ]
+    for column in ("verified_source_location", "reviewed_on", "reviewer", "verification_notes"):
+        annotated[column] = [
+            status_by_key[key][column] for key in source_keys
+        ]
+
+    study_status: dict[str, str] = {}
+    for study_id, group in annotated.groupby("study_id", dropna=False):
+        statuses = set(group["verification_status"])
+        if statuses == {"VERIFIED"}:
+            study_status[str(study_id)] = "VERIFIED"
+        elif "VERIFICATION_PENDING" in statuses:
+            study_status[str(study_id)] = "VERIFICATION_PENDING"
+        else:
+            study_status[str(study_id)] = "REJECTED"
+
+    pending_count = int(annotated["verification_status"].eq("VERIFICATION_PENDING").sum())
+    if pending_count:
+        if include_pending:
+            warnings.warn(
+                f"Análise exploratória inclui {pending_count} registros VERIFICATION_PENDING; "
+                "eles não são benchmarks aprovados.",
+                UserWarning,
+                stacklevel=2,
+            )
+            annotated = annotated.loc[
+                annotated["verification_status"].isin(["VERIFIED", "VERIFICATION_PENDING"])
+            ].copy()
+        else:
+            warnings.warn(
+                f"{pending_count} registros VERIFICATION_PENDING foram excluídos da análise aprovada.",
+                UserWarning,
+                stacklevel=2,
+            )
+            annotated = annotated.loc[annotated["verification_status"] == "VERIFIED"].copy()
+    else:
+        annotated = annotated.loc[annotated["verification_status"] == "VERIFIED"].copy()
+    return annotated, study_status
+
+
+def validate_literature_data(
+    root: Path, include_pending: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load literature tables and reject incomplete, untraceable, or misclassified rows."""
     lit_dir = root / "data" / "literature"
     studies_path = lit_dir / "literature_studies.csv"
@@ -1152,6 +1429,12 @@ def validate_literature_data(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd
         if bad_evidence_units:
             raise ValueError(f"Unidades de tempo não reconhecidas em literature_evidence.csv: {bad_evidence_units}.")
 
+    measurements, study_status = _load_literature_verification_status(
+        lit_dir, measurements, include_pending=include_pending
+    )
+    evidence["verification_status"] = evidence["study_id"].astype(str).map(study_status).fillna(
+        "VERIFICATION_PENDING"
+    )
     return studies, measurements, evidence
 
 
@@ -1198,9 +1481,33 @@ def calculate_literature_retention(measurements: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
-def fit_literature_kinetics(measurements: pd.DataFrame) -> pd.DataFrame:
+def fit_literature_kinetics(
+    measurements: pd.DataFrame, include_pending: bool = False
+) -> pd.DataFrame:
     """Fit first-order kinetics only to individual, compatible, published time series."""
     df = measurements.copy()
+    if "verification_status" not in df.columns:
+        raise ValueError("Ajustes bibliográficos exigem verification_status validado pelo manifesto lateral.")
+    statuses = df["verification_status"].astype("string").str.strip().str.upper()
+    invalid_statuses = sorted(set(statuses.dropna()) - LITERATURE_VERIFICATION_STATUSES)
+    if statuses.isna().any() or statuses.eq("").any() or invalid_statuses:
+        raise ValueError(f"verification_status inválido nos dados cinéticos: {invalid_statuses}.")
+    pending_count = int(statuses.eq("VERIFICATION_PENDING").sum())
+    if pending_count and include_pending:
+        warnings.warn(
+            f"Ajuste cinético exploratório inclui {pending_count} registros VERIFICATION_PENDING.",
+            UserWarning,
+            stacklevel=2,
+        )
+        df = df.loc[statuses.isin(["VERIFIED", "VERIFICATION_PENDING"])].copy()
+    else:
+        if pending_count:
+            warnings.warn(
+                f"{pending_count} registros VERIFICATION_PENDING foram excluídos dos ajustes aprovados.",
+                UserWarning,
+                stacklevel=2,
+            )
+        df = df.loc[statuses.eq("VERIFIED")].copy()
     numeric_columns(df, ["time_value", "value"])
     records = []
 
@@ -1210,7 +1517,9 @@ def fit_literature_kinetics(measurements: pd.DataFrame) -> pd.DataFrame:
         "pH", "additive", "additive_concentration_pct",
     ]
     for group_key, group in df.groupby(keys, dropna=False, sort=False):
-        if not group["data_origin"].astype(str).str.upper().eq("PUBLISHED_ARTICLE").all():
+        if (not group["data_origin"].astype(str).str.upper().eq("PUBLISHED_ARTICLE").all()
+                or not group["verification_status"].eq("VERIFIED").all()
+                and not (include_pending and group["verification_status"].eq("VERIFICATION_PENDING").all())):
             continue
         valid = group.loc[(group["value"] > 0) & group["time_value"].notna()].sort_values("time_value")
         if valid["time_value"].nunique() < 3:
@@ -1241,11 +1550,648 @@ def fit_literature_kinetics(measurements: pd.DataFrame) -> pd.DataFrame:
             "source_url": valid.iloc[0]["source_url"],
             "doi": valid.iloc[0]["doi"],
             "source_location": valid.iloc[0]["source_location"],
+            "verification_status": valid.iloc[0]["verification_status"],
             "fit_note": "Ajuste exploratório; comparar resíduos e validar pressupostos antes de interpretar.",
         })
         records.append(row)
 
     return pd.DataFrame(records)
+
+
+def _fit_kinetic_model(model: str, times: Iterable[float], values: Iterable[float]) -> dict:
+    """Fit a two-parameter decay model by least squares on the original value scale."""
+    x = np.asarray(list(times), dtype=float)
+    y = np.asarray(list(values), dtype=float)
+    if x.ndim != 1 or y.ndim != 1 or len(x) != len(y):
+        raise ValueError("Tempos e valores devem ser vetores unidimensionais de mesmo tamanho.")
+    if len(x) < 3 or len(np.unique(x)) < 3:
+        raise ValueError("O ajuste cinético requer ao menos três tempos distintos.")
+    if not np.isfinite(x).all() or not np.isfinite(y).all() or (y <= 0).any():
+        raise ValueError("Tempos devem ser finitos e concentrações positivas e finitas.")
+
+    elapsed = x - float(np.min(x))
+    if model == "zero_order":
+        equation = lambda time, initial, rate: initial - rate * time
+        slope, intercept = np.polyfit(elapsed, y, 1)
+        initial_guess = (max(float(intercept), np.finfo(float).eps), max(float(-slope), 1e-12))
+        rate_name = "k0"
+    elif model == "first_order":
+        equation = lambda time, initial, rate: initial * np.exp(-rate * time)
+        slope, intercept = np.polyfit(elapsed, np.log(y), 1)
+        initial_guess = (max(float(np.exp(intercept)), np.finfo(float).eps),
+                         max(float(-slope), 1e-12))
+        elapsed_span = float(np.max(elapsed))
+        endpoint_rate = -np.log(float(y[-1]) / float(y[0])) / elapsed_span
+        saturation_rate = -np.log(np.finfo(float).tiny) / elapsed_span
+        initial_guesses = [
+            initial_guess,
+            (float(y[0]), max(float(endpoint_rate), np.finfo(float).eps)),
+            (float(y[0]), saturation_rate),
+        ]
+        rate_name = "k1"
+    elif model == "second_order":
+        equation = lambda time, initial, rate: initial / (1 + rate * initial * time)
+        slope, intercept = np.polyfit(elapsed, 1 / y, 1)
+        initial_guess = (max(float(1 / intercept), np.finfo(float).eps),
+                         max(float(slope), 1e-12))
+        rate_name = "k2"
+    else:
+        raise ValueError(f"Modelo cinético não suportado: {model}")
+
+    if model != "first_order":
+        initial_guesses = [initial_guess]
+
+    candidates = []
+    for guess in initial_guesses:
+        try:
+            parameters, _ = curve_fit(
+                equation,
+                elapsed,
+                y,
+                p0=guess,
+                bounds=(0, np.inf),
+                method="trf",
+                x_scale="jac",
+                max_nfev=50000,
+            )
+        except RuntimeError:
+            continue
+        predictions = equation(elapsed, *parameters)
+        if not np.isfinite(parameters).all() or not np.isfinite(predictions).all():
+            continue
+        residuals = y - predictions
+        sse = float(np.sum(residuals ** 2))
+        if np.isfinite(sse):
+            candidates.append((sse, parameters, predictions))
+    if not candidates:
+        raise RuntimeError(f"Nenhum ajuste cinético válido convergiu para o modelo {model}.")
+
+    sse, parameters, predictions = min(candidates, key=lambda candidate: candidate[0])
+    residuals = y - predictions
+    n = len(y)
+    parameter_count = 3  # Two fitted parameters and the residual variance.
+    if n > parameter_count + 1 and sse > 0:
+        aicc = float(
+            n * np.log(sse / n)
+            + 2 * parameter_count
+            + 2 * parameter_count * (parameter_count + 1) / (n - parameter_count - 1)
+        )
+    else:
+        aicc = np.nan
+
+    return {
+        "initial_concentration": float(parameters[0]),
+        "rate_parameter_name": rate_name,
+        "rate_parameter_value": float(parameters[1]),
+        "predictions": predictions.tolist(),
+        "residuals": residuals.tolist(),
+        "rmse": float(np.sqrt(np.mean(residuals ** 2))),
+        "mae": float(np.mean(np.abs(residuals))),
+        "sse": sse,
+        "aicc": aicc,
+    }
+
+
+def compare_literature_kinetic_models(
+    measurements: pd.DataFrame, studies: pd.DataFrame, include_pending: bool = False
+) -> pd.DataFrame:
+    """Compare simple decay models without pooling literature series or extrapolating."""
+    required_measurement_columns = {
+        "study_id", "treatment_id", "source_url", "doi", "source_location",
+        "time_value", "time_unit", "measurement", "value", "value_unit",
+        "data_origin", "verification_status",
+    }
+    missing = required_measurement_columns - set(measurements.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes para comparação cinética: {sorted(missing)}.")
+    required_study_columns = {"study_id", "citation", "title", "doi", "url"}
+    missing = required_study_columns - set(studies.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes em metadados dos estudos: {sorted(missing)}.")
+    if studies["study_id"].duplicated().any():
+        raise ValueError("study_id duplicado em metadados dos estudos.")
+
+    df = measurements.copy()
+    if "verification_status" not in df.columns:
+        raise ValueError("A comparação exige verification_status validado pelo manifesto lateral.")
+    statuses = df["verification_status"].astype("string").str.strip().str.upper()
+    invalid_statuses = sorted(set(statuses.dropna()) - LITERATURE_VERIFICATION_STATUSES)
+    if statuses.isna().any() or statuses.eq("").any() or invalid_statuses:
+        raise ValueError(f"verification_status inválido nos dados cinéticos: {invalid_statuses}.")
+    pending_count = int(statuses.eq("VERIFICATION_PENDING").sum())
+    if pending_count and include_pending:
+        warnings.warn(
+            f"A comparação cinética exploratória inclui {pending_count} registros VERIFICATION_PENDING.",
+            UserWarning,
+            stacklevel=2,
+        )
+        df = df.loc[statuses.isin(["VERIFIED", "VERIFICATION_PENDING"])].copy()
+    else:
+        if pending_count:
+            warnings.warn(
+                f"{pending_count} registros VERIFICATION_PENDING foram excluídos da comparação cinética.",
+                UserWarning,
+                stacklevel=2,
+            )
+        df = df.loc[statuses.eq("VERIFIED")].copy()
+
+    numeric_columns(df, ["time_value", "value"])
+    grouping_keys = [
+        "study_id", "treatment_id", "source_url", "doi", "source_location",
+        "matrix", "measurement", "value_unit", "time_unit", "solvent",
+        "temperature_c", "light_condition", "oxygen_condition", "package_material",
+        "pH", "additive", "additive_concentration_pct", "data_origin",
+        "verification_status",
+    ]
+    missing_grouping_columns = set(grouping_keys) - set(df.columns)
+    if missing_grouping_columns:
+        raise ValueError(f"Colunas ausentes para separar séries: {sorted(missing_grouping_columns)}.")
+
+    study_metadata = studies.set_index("study_id")
+    model_definitions = {
+        "zero_order": "C(t)=C0-k0*(t-t_min)",
+        "first_order": "C(t)=C0*exp(-k1*(t-t_min))",
+        "second_order": "C(t)=C0/(1+k2*C0*(t-t_min))",
+    }
+    output_columns = grouping_keys + [
+        "citation", "title", "study_url", "model", "model_equation",
+        "initial_concentration_fit", "initial_concentration_unit", "rate_parameter",
+        "rate_parameter_value", "rate_parameter_unit", "n_observations", "n_timepoints",
+        "fit_time_min", "fit_time_max", "observed_times_json", "observed_values_json",
+        "predicted_values_json", "residuals_json", "residual_rmse", "residual_mae",
+        "residual_sse", "aicc", "aicc_assumption", "model_selection_status",
+        "fit_method", "analysis_scope", "reported_or_calculated", "calculation_formula",
+        "extrapolation_policy", "uncertainty_status", "uncertainty_note",
+        "uncertainty_recommendation",
+    ]
+    records = []
+    for group_key, group in df.groupby(grouping_keys, dropna=False, sort=False):
+        row = dict(zip(grouping_keys, group_key))
+        study_id = row["study_id"]
+        if study_id not in study_metadata.index:
+            raise ValueError(f"Metadados ausentes para estudo cinético: {study_id}.")
+        study = study_metadata.loc[study_id]
+        if str(row["doi"]).strip().casefold() != str(study["doi"]).strip().casefold():
+            raise ValueError(f"DOI das medições não corresponde ao registro do estudo {study_id}.")
+        if str(row["source_url"]).strip() != str(study["url"]).strip():
+            raise ValueError(f"URL das medições não corresponde ao registro do estudo {study_id}.")
+        if str(row["data_origin"]).upper() != "PUBLISHED_ARTICLE":
+            continue
+
+        valid = group.sort_values("time_value")
+        x = valid["time_value"].to_numpy(dtype=float)
+        y = valid["value"].to_numpy(dtype=float)
+        if len(np.unique(x)) < 3:
+            continue
+        if not np.isfinite(x).all() or not np.isfinite(y).all() or (y <= 0).any():
+            raise ValueError(f"Série cinética inválida para {study_id}/{row['treatment_id']}.")
+
+        for model, formula in model_definitions.items():
+            fit = _fit_kinetic_model(model, x, y)
+            if model == "zero_order":
+                rate_unit = f"{row['value_unit']} per {row['time_unit']}"
+            elif model == "first_order":
+                rate_unit = f"1/{row['time_unit']}"
+            else:
+                rate_unit = f"1/({row['value_unit']}*{row['time_unit']})"
+            status = row["verification_status"]
+            records.append({
+                **row,
+                "citation": study["citation"],
+                "title": study["title"],
+                "study_url": study["url"],
+                "model": model,
+                "model_equation": formula,
+                "initial_concentration_fit": fit["initial_concentration"],
+                "initial_concentration_unit": row["value_unit"],
+                "rate_parameter": fit["rate_parameter_name"],
+                "rate_parameter_value": fit["rate_parameter_value"],
+                "rate_parameter_unit": rate_unit,
+                "n_observations": len(x),
+                "n_timepoints": len(np.unique(x)),
+                "fit_time_min": float(np.min(x)),
+                "fit_time_max": float(np.max(x)),
+                "observed_times_json": json.dumps(x.tolist(), separators=(",", ":")),
+                "observed_values_json": json.dumps(y.tolist(), separators=(",", ":")),
+                "predicted_values_json": json.dumps(fit["predictions"], separators=(",", ":")),
+                "residuals_json": json.dumps(fit["residuals"], separators=(",", ":")),
+                "residual_rmse": fit["rmse"],
+                "residual_mae": fit["mae"],
+                "residual_sse": fit["sse"],
+                "aicc": fit["aicc"],
+                "aicc_assumption": "Gaussian iid residuals on original value scale; descriptive only",
+                "model_selection_status": (
+                    "INSUFFICIENT_SAMPLE_SIZE_FOR_AICC"
+                    if not np.isfinite(fit["aicc"])
+                    else "DESCRIPTIVE_AICC_IID_ASSUMPTION_ONLY"
+                ),
+                "fit_method": "Nonlinear least squares on original value scale",
+                "verification_status": status,
+                "analysis_scope": (
+                    "EXPLORATORY_SOURCE_PENDING"
+                    if status == "VERIFICATION_PENDING"
+                    else "SOURCE_VERIFIED"
+                ),
+                "reported_or_calculated": "CALCULATED",
+                "calculation_formula": formula,
+                "extrapolation_policy": "NONE_WITHIN_OBSERVED_INTERVAL",
+                "uncertainty_status": "NOT_ESTIMATED_NO_INDEPENDENT_REPLICATES",
+                "uncertainty_note": (
+                    "Temporal observations are not independent replicates; source data provide "
+                    "no independent lot-level replication or standard errors for this series."
+                ),
+                "uncertainty_recommendation": (
+                    "With independent lots, use a lot-level cluster bootstrap or a hierarchical "
+                    "nonlinear model with lot effects; do not resample timepoints as independent."
+                ),
+            })
+
+    return pd.DataFrame(records, columns=output_columns)
+
+
+def estimate_literature_kinetic_parameter_uncertainty(
+    comparison: pd.DataFrame, confidence_level: float = 0.95
+) -> pd.DataFrame:
+    """Create conditional, exploratory parameter intervals from stored model fits."""
+    required = {
+        "model", "initial_concentration_fit", "rate_parameter_value", "n_observations",
+        "observed_times_json", "observed_values_json", "predicted_values_json",
+    }
+    missing = required - set(comparison.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes para incerteza cinética: {sorted(missing)}.")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level deve estar entre 0 e 1.")
+
+    report = comparison.copy()
+    interval_columns = [
+        "initial_concentration_se", "initial_concentration_ci_lower",
+        "initial_concentration_ci_upper", "rate_parameter_se",
+        "rate_parameter_ci_lower", "rate_parameter_ci_upper",
+    ]
+    for column in interval_columns:
+        report[column] = np.nan
+    report["parameter_ci_confidence_level"] = confidence_level
+    report["parameter_residual_degrees_of_freedom"] = np.nan
+    report["parameter_uncertainty_method"] = "NOT_ESTIMATED"
+    report["parameter_uncertainty_status"] = ""
+    report["parameter_uncertainty_assumptions"] = (
+        "Conditional nonlinear least squares covariance; Gaussian, homoscedastic, "
+        "independent residuals; local linear approximation."
+    )
+    report["parameter_uncertainty_limitations"] = (
+        "Exploratory parameter intervals only; temporal dependence, no independent lot "
+        "replicates, pending source verification, and no external validation. "
+        "Intervals are not calibrated prediction intervals."
+    )
+
+    jacobian_functions = {
+        "zero_order": lambda time, initial, rate: np.column_stack(
+            (np.ones_like(time), -time)
+        ),
+        "first_order": lambda time, initial, rate: np.column_stack(
+            (np.exp(-rate * time), -time * initial * np.exp(-rate * time))
+        ),
+        "second_order": lambda time, initial, rate: np.column_stack(
+            (
+                1 / (1 + rate * initial * time) ** 2,
+                -(initial ** 2) * time / (1 + rate * initial * time) ** 2,
+            )
+        ),
+    }
+
+    for index, row in report.iterrows():
+        times = np.asarray(json.loads(row["observed_times_json"]), dtype=float)
+        values = np.asarray(json.loads(row["observed_values_json"]), dtype=float)
+        predictions = np.asarray(json.loads(row["predicted_values_json"]), dtype=float)
+        n = len(values)
+        if (
+            times.ndim != 1
+            or predictions.ndim != 1
+            or len(times) != n
+            or len(predictions) != n
+            or not np.isfinite(times).all()
+            or not np.isfinite(values).all()
+            or not np.isfinite(predictions).all()
+        ):
+            raise ValueError("Tempos, valores e previsões devem ser vetores finitos de mesmo tamanho.")
+        if int(row["n_observations"]) != n:
+            raise ValueError("n_observations não corresponde às observações armazenadas.")
+
+        degrees_of_freedom = n - 2
+        report.at[index, "parameter_residual_degrees_of_freedom"] = degrees_of_freedom
+        if n <= 3:
+            report.at[index, "parameter_uncertainty_status"] = (
+                "INSUFFICIENT_FOR_ROBUST_MODEL_SELECTION"
+            )
+            report.at[index, "parameter_uncertainty_limitations"] += (
+                " Only three observations are available; no parameter intervals are reported "
+                "because uncertainty and model selection are not robustly estimable."
+            )
+            continue
+
+        model = row["model"]
+        if model not in jacobian_functions:
+            raise ValueError(f"Modelo cinético não suportado para incerteza: {model}.")
+        elapsed = times - float(np.min(times))
+        initial = float(row["initial_concentration_fit"])
+        rate = float(row["rate_parameter_value"])
+        jacobian = jacobian_functions[model](elapsed, initial, rate)
+        residuals = values - predictions
+        residual_variance = float(residuals @ residuals / degrees_of_freedom)
+        information = jacobian.T @ jacobian
+        if np.linalg.matrix_rank(information) < 2:
+            report.at[index, "parameter_uncertainty_status"] = "COVARIANCE_UNAVAILABLE"
+            report.at[index, "parameter_uncertainty_limitations"] += (
+                " The local parameter Jacobian is rank deficient."
+            )
+            continue
+
+        try:
+            covariance = residual_variance * np.linalg.inv(information)
+        except np.linalg.LinAlgError:
+            report.at[index, "parameter_uncertainty_status"] = "COVARIANCE_UNAVAILABLE"
+            report.at[index, "parameter_uncertainty_limitations"] += (
+                " The local covariance matrix could not be inverted."
+            )
+            continue
+        if not np.isfinite(covariance).all() or np.any(np.diag(covariance) < 0):
+            report.at[index, "parameter_uncertainty_status"] = "COVARIANCE_UNAVAILABLE"
+            report.at[index, "parameter_uncertainty_limitations"] += (
+                " The local covariance matrix is non-finite or invalid."
+            )
+            continue
+
+        standard_errors = np.sqrt(np.diag(covariance))
+        critical_value = float(student_t.ppf((1 + confidence_level) / 2, degrees_of_freedom))
+        report.at[index, "initial_concentration_se"] = standard_errors[0]
+        report.at[index, "initial_concentration_ci_lower"] = initial - critical_value * standard_errors[0]
+        report.at[index, "initial_concentration_ci_upper"] = initial + critical_value * standard_errors[0]
+        report.at[index, "rate_parameter_se"] = standard_errors[1]
+        report.at[index, "rate_parameter_ci_lower"] = rate - critical_value * standard_errors[1]
+        report.at[index, "rate_parameter_ci_upper"] = rate + critical_value * standard_errors[1]
+        report.at[index, "parameter_uncertainty_method"] = (
+            "Local Jacobian covariance with Student-t Wald intervals"
+        )
+        report.at[index, "parameter_uncertainty_status"] = (
+            "EXPLORATORY_CONDITIONAL_INTERVALS"
+        )
+
+    return report
+
+
+def estimate_literature_kinetic_concentration_intervals(
+    comparison: pd.DataFrame,
+    confidence_level: float = 0.95,
+    n_simulations: int = 10000,
+    random_seed: int = 42,
+) -> pd.DataFrame:
+    """Simulate conditional mean-response and individual-observation intervals."""
+    required = {
+        "study_id", "treatment_id", "model", "initial_concentration_fit",
+        "rate_parameter_value", "n_observations", "time_unit", "value_unit",
+        "observed_times_json", "observed_values_json", "predicted_values_json",
+    }
+    missing = required - set(comparison.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes para intervalos de concentração: {sorted(missing)}.")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level deve estar entre 0 e 1.")
+    if not isinstance(n_simulations, int) or n_simulations < 1000:
+        raise ValueError("n_simulations deve ser um inteiro maior ou igual a 1000.")
+
+    interval_columns = [
+        "time_value", "observed_value", "mean_response_estimate",
+        "mean_response_ci_lower", "mean_response_ci_upper",
+        "individual_observation_prediction",
+        "individual_observation_pi_lower", "individual_observation_pi_upper",
+        "interval_confidence_level", "concentration_interval_method",
+        "concentration_uncertainty_status", "concentration_interval_assumptions",
+        "concentration_interval_limitations", "parameter_residual_degrees_of_freedom",
+        "requested_simulations", "accepted_parameter_draws",
+    ]
+    excluded = {
+        "observed_times_json", "observed_values_json", "predicted_values_json",
+        "residuals_json",
+    }
+    output_columns = [column for column in comparison.columns if column not in excluded]
+    output_columns.extend(interval_columns)
+    records = []
+    rng = np.random.default_rng(random_seed)
+    alpha = (1 - confidence_level) / 2
+    assumptions = (
+        "Conditional parametric simulation: local least-squares covariance; Gaussian, "
+        "homoscedastic and independent residuals; scaled-chi-square residual variance; "
+        "local linear approximation; parameter draws conditioned on the nonnegative "
+        "fit constraints."
+    )
+    limitations = (
+        "Exploratory conditional intervals only; temporal dependence is not represented, "
+        "there are no independent lot replicates, source verification remains pending, "
+        "and there is no external calibration. Not suitable as calibrated forecasts."
+    )
+    model_functions = {
+        "zero_order": lambda elapsed, initial, rate: initial - rate * elapsed,
+        "first_order": lambda elapsed, initial, rate: initial * np.exp(-rate * elapsed),
+        "second_order": lambda elapsed, initial, rate: (
+            initial / (1 + rate * initial * elapsed)
+        ),
+    }
+    jacobian_functions = {
+        "zero_order": lambda elapsed, initial, rate: np.column_stack(
+            (np.ones_like(elapsed), -elapsed)
+        ),
+        "first_order": lambda elapsed, initial, rate: np.column_stack(
+            (
+                np.exp(-rate * elapsed),
+                -elapsed * initial * np.exp(-rate * elapsed),
+            )
+        ),
+        "second_order": lambda elapsed, initial, rate: np.column_stack(
+            (
+                1 / (1 + rate * initial * elapsed) ** 2,
+                -(initial ** 2) * elapsed / (1 + rate * initial * elapsed) ** 2,
+            )
+        ),
+    }
+
+    for _, row in comparison.iterrows():
+        times = np.asarray(json.loads(row["observed_times_json"]), dtype=float)
+        values = np.asarray(json.loads(row["observed_values_json"]), dtype=float)
+        stored_predictions = np.asarray(json.loads(row["predicted_values_json"]), dtype=float)
+        n = len(values)
+        if (
+            times.ndim != 1
+            or values.ndim != 1
+            or stored_predictions.ndim != 1
+            or len(times) != n
+            or len(stored_predictions) != n
+            or not np.isfinite(times).all()
+            or not np.isfinite(values).all()
+            or not np.isfinite(stored_predictions).all()
+        ):
+            raise ValueError(
+                "Tempos, valores e previsões devem ser vetores finitos de mesmo tamanho."
+            )
+        if int(row["n_observations"]) != n:
+            raise ValueError("n_observations não corresponde às observações armazenadas.")
+
+        model = row["model"]
+        if model not in model_functions:
+            raise ValueError(f"Modelo cinético não suportado para intervalos: {model}.")
+        initial = float(row["initial_concentration_fit"])
+        rate = float(row["rate_parameter_value"])
+        elapsed = times - float(np.min(times))
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            mean_estimate = model_functions[model](elapsed, initial, rate)
+        fitted_parameters_valid = (
+            math.isfinite(initial)
+            and math.isfinite(rate)
+            and initial > 0
+            and rate >= 0
+        )
+        fitted_domain_valid = (
+            np.isfinite(mean_estimate).all() and (mean_estimate > 0).all()
+        )
+        fit_values_valid = (
+            fitted_parameters_valid and fitted_domain_valid
+        )
+        residuals = values - mean_estimate
+        degrees_of_freedom = n - 2
+
+        status = "INSUFFICIENT_FOR_CONDITIONAL_INTERVALS"
+        mean_lower = mean_upper = prediction_lower = prediction_upper = np.nan
+        accepted_count = 0
+        method = "NOT_ESTIMATED"
+        if n > 3 and fit_values_valid:
+            jacobian = jacobian_functions[model](elapsed, initial, rate)
+            information = jacobian.T @ jacobian
+            residual_variance = float(residuals @ residuals / degrees_of_freedom)
+            if (
+                np.linalg.matrix_rank(information) == 2
+                and math.isfinite(residual_variance)
+                and residual_variance > 0
+            ):
+                try:
+                    inverse_information = np.linalg.inv(information)
+                    cholesky = np.linalg.cholesky(inverse_information)
+                except np.linalg.LinAlgError:
+                    cholesky = None
+                if cholesky is not None and np.isfinite(cholesky).all():
+                    parameter_draws = []
+                    residual_sd_draws = []
+                    for _ in range(20):
+                        variance_draws = (
+                            residual_variance * degrees_of_freedom
+                            / rng.chisquare(degrees_of_freedom, size=n_simulations)
+                        )
+                        standard_normals = rng.standard_normal((n_simulations, 2))
+                        draws = np.array([initial, rate]) + (
+                            standard_normals @ cholesky.T
+                        ) * np.sqrt(variance_draws)[:, None]
+                        draw_initial = draws[:, 0]
+                        draw_rate = draws[:, 1]
+                        if model == "zero_order":
+                            draw_predictions = (
+                                draw_initial[:, None] - draw_rate[:, None] * elapsed
+                            )
+                        elif model == "first_order":
+                            draw_predictions = draw_initial[:, None] * np.exp(
+                                -draw_rate[:, None] * elapsed
+                            )
+                        else:
+                            draw_predictions = draw_initial[:, None] / (
+                                1 + draw_rate[:, None] * draw_initial[:, None] * elapsed
+                            )
+                        valid = (
+                            (draw_initial > 0)
+                            & (draw_rate >= 0)
+                            & np.isfinite(draw_predictions).all(axis=1)
+                            & (draw_predictions > 0).all(axis=1)
+                        )
+                        parameter_draws.extend(draws[valid].tolist())
+                        residual_sd_draws.extend(np.sqrt(variance_draws[valid]).tolist())
+                        if len(parameter_draws) >= n_simulations:
+                            break
+
+                    accepted_count = min(len(parameter_draws), n_simulations)
+                    if accepted_count == n_simulations:
+                        draws = np.asarray(parameter_draws[:n_simulations], dtype=float)
+                        residual_sd = np.asarray(
+                            residual_sd_draws[:n_simulations], dtype=float
+                        )
+                        simulated_mean = model_functions[model](
+                            elapsed[None, :], draws[:, 0, None], draws[:, 1, None]
+                        )
+                        simulated_individual = simulated_mean + (
+                            rng.standard_normal(simulated_mean.shape)
+                            * residual_sd[:, None]
+                        )
+                        mean_lower, mean_upper = np.quantile(
+                            simulated_mean, [alpha, 1 - alpha], axis=0
+                        )
+                        prediction_lower, prediction_upper = np.quantile(
+                            simulated_individual, [alpha, 1 - alpha], axis=0
+                        )
+                        status = "EXPLORATORY_CONDITIONAL_SIMULATION"
+                        method = (
+                            "Parametric Monte Carlo: local covariance parameter draws "
+                            "and Gaussian residual prediction"
+                        )
+                    else:
+                        status = "INSUFFICIENT_VALID_PARAMETER_DRAWS"
+                        limitations += (
+                            " Nonnegative parameter/domain constraints prevented enough "
+                            "valid simulation draws."
+                        )
+                else:
+                    status = "COVARIANCE_UNAVAILABLE"
+            else:
+                status = "COVARIANCE_UNAVAILABLE"
+        elif n > 3:
+            if fitted_parameters_valid and np.isfinite(mean_estimate).all():
+                status = "MODEL_OUTSIDE_PHYSICAL_DOMAIN"
+                limitations += (
+                    " The fitted model predicts a nonpositive concentration at one or "
+                    "more observed times; intervals are withheld for the series."
+                )
+            else:
+                status = "INVALID_FITTED_PARAMETERS"
+
+        if status == "EXPLORATORY_CONDITIONAL_SIMULATION":
+            mean_lower_values = mean_lower
+            mean_upper_values = mean_upper
+            prediction_lower_values = prediction_lower
+            prediction_upper_values = prediction_upper
+        else:
+            mean_lower_values = np.full(n, np.nan)
+            mean_upper_values = np.full(n, np.nan)
+            prediction_lower_values = np.full(n, np.nan)
+            prediction_upper_values = np.full(n, np.nan)
+
+        for position, time_value in enumerate(times):
+            record = {key: value for key, value in row.items() if key not in excluded}
+            record.update({
+                "time_value": float(time_value),
+                "observed_value": float(values[position]),
+                "mean_response_estimate": float(mean_estimate[position]),
+                "mean_response_ci_lower": float(mean_lower_values[position]),
+                "mean_response_ci_upper": float(mean_upper_values[position]),
+                "individual_observation_prediction": float(mean_estimate[position]),
+                "individual_observation_pi_lower": float(prediction_lower_values[position]),
+                "individual_observation_pi_upper": float(prediction_upper_values[position]),
+                "interval_confidence_level": confidence_level,
+                "concentration_interval_method": method,
+                "concentration_uncertainty_status": status,
+                "concentration_interval_assumptions": assumptions,
+                "concentration_interval_limitations": limitations,
+                "parameter_residual_degrees_of_freedom": degrees_of_freedom,
+                "requested_simulations": n_simulations,
+                "accepted_parameter_draws": accepted_count,
+            })
+            records.append(record)
+
+    return pd.DataFrame(records, columns=output_columns)
 
 
 def plot_literature_series(measurements: pd.DataFrame, out_dir: Path) -> Path:
@@ -1328,48 +2274,462 @@ def plot_literature_retention(measurements_with_retention: pd.DataFrame, out_dir
     return path
 
 
-def analyze_literature(root: Path) -> None:
-    """Analyze literature data and generate HTML report."""
+def load_harmonized_catalog(root: Path) -> pd.DataFrame:
+    """Carrega e valida a base harmonizada derivada (Fase 2) como fonte da analise.
+
+    Os CSVs brutos continuam sendo as fontes de dados: cada linha da base e
+    conferida, linha a linha, contra o CSV bruto correspondente
+    (source_record_id -> numero de linha). Qualquer divergencia interrompe a
+    analise com instrucao de regeneracao; nada e corrigido silenciosamente.
+    Nenhuma promocao de status acontece nesta camada: VERIFIED so e aceito com
+    localizacao primaria especifica e confirmada.
+    """
+    catalog_path = root / HARMONIZED_CATALOG_RELATIVE
+    if not catalog_path.exists():
+        raise FileNotFoundError(
+            f"Base harmonizada ausente: {catalog_path}. "
+            "Gere-a com: python tools/harmonize_literature.py --dir ."
+        )
+    catalog = pd.read_csv(catalog_path, dtype=str, keep_default_na=False)
+    missing = set(HARMONIZED_REQUIRED_COLUMNS) - set(catalog.columns)
+    if missing:
+        raise ValueError(
+            "Base harmonizada sem colunas obrigatorias: " + ", ".join(sorted(missing))
+            + ". Regenere com tools/harmonize_literature.py."
+        )
+    if catalog.empty:
+        raise ValueError("Base harmonizada vazia; regenere com tools/harmonize_literature.py.")
+
+    statuses = catalog["verification_status"].str.strip().str.upper()
+    if statuses.eq("").any():
+        raise ValueError("Toda observacao da base harmonizada precisa de verification_status explicito.")
+    invalid_statuses = sorted(set(statuses) - LITERATURE_VERIFICATION_STATUSES)
+    if invalid_statuses:
+        raise ValueError(f"verification_status fora do vocabulario do projeto: {invalid_statuses}.")
+    catalog["verification_status"] = statuses
+
+    classes = catalog["evidence_class"].str.strip()
+    if classes.eq("").any():
+        raise ValueError("Toda observacao da base harmonizada precisa de evidence_class.")
+    invalid_classes = sorted(set(classes) - LITERATURE_EVIDENCE_CLASSES)
+    if invalid_classes:
+        raise ValueError(f"evidence_class desconhecida na base harmonizada: {invalid_classes}.")
+    catalog["evidence_class"] = classes
+
+    if not catalog["observation_id"].is_unique:
+        raise ValueError("observation_id duplicado na base harmonizada.")
+    if not catalog["source_record_id"].is_unique:
+        raise ValueError("source_record_id duplicado na base harmonizada.")
+    execution_ids = {value for value in catalog["execution_id"].str.strip() if value}
+    if len(execution_ids) != 1:
+        raise ValueError(
+            "A base harmonizada deve conter exatamente um execution_id "
+            "(uma unica execucao deterministica)."
+        )
+
+    verified_rows = catalog.loc[catalog["verification_status"] == "VERIFIED"]
+    if not verified_rows.empty:
+        locations = verified_rows["source_locator"].str.strip()
+        folded = locations.str.casefold()
+        unpinned = locations.eq("") | folded.str.contains("pendente") | folded.str.contains("pending")
+        if unpinned.any():
+            raise ValueError(
+                "Promocao de status bloqueada: ha observacoes VERIFIED sem "
+                "localizacao primaria especifica e confirmada na base harmonizada."
+            )
+
+    _check_catalog_against_raw_sources(root / "data" / "literature", catalog)
+    return catalog
+
+
+def _check_catalog_against_raw_sources(lit_dir: Path, catalog: pd.DataFrame) -> None:
+    """Confere a base derivada contra os CSVs brutos (medições e evidencias).
+
+    Compara por source_record_id (STUDY|L{n} / STUDY|E{n} -> linha do CSV, com
+    cabecalho na linha 1). Falha = base desatualizada; a correcao e sempre a
+    regeneracao, nunca edicao da base por esta camada.
+    """
+
+    def same_text(left: object, right: object) -> bool:
+        return str(left).strip() == str(right).strip()
+
+    def same_number(left: object, right: object) -> bool:
+        try:
+            return float(left) == float(right)
+        except (TypeError, ValueError):
+            return same_text(left, right)
+
+    measurements_path = lit_dir / "literature_measurements.csv"
+    evidence_path = lit_dir / "literature_evidence.csv"
+    for path in (measurements_path, evidence_path):
+        if not path.exists():
+            raise FileNotFoundError(f"CSV bibliografico bruto ausente: {path}.")
+
+    by_source = dict(zip(catalog["source_record_id"], catalog.to_dict("records")))
+
+    raw_measurements = pd.read_csv(measurements_path, dtype=str, keep_default_na=False)
+    expected_measurement_ids = set()
+    for line_number, raw in enumerate(raw_measurements.to_dict("records"), start=2):
+        source_id = f"{raw['study_id']}|L{line_number}"
+        expected_measurement_ids.add(source_id)
+        row = by_source.get(source_id)
+        if row is None:
+            raise ValueError(
+                f"Base harmonizada nao contem a medicao {source_id}; "
+                "regenere com tools/harmonize_literature.py."
+            )
+        for field, raw_key, catalog_key in (
+            ("study_id", "study_id", "study_id"),
+            ("treatment_id", "treatment_id", "treatment_id"),
+            ("measurement", "measurement", "measurement"),
+            ("value_unit", "value_unit", "unit_original"),
+            ("time_unit", "time_unit", "time_unit_original"),
+            ("data_origin", "data_origin", "data_origin"),
+            ("reported_or_calculated", "reported_or_calculated", "reported_or_calculated"),
+        ):
+            if not same_text(raw[raw_key], row[catalog_key]):
+                raise ValueError(
+                    f"Divergencia entre CSV bruto e base harmonizada em {source_id} "
+                    f"({field}); regenere com tools/harmonize_literature.py."
+                )
+        for field, raw_key, catalog_key in (
+            ("value", "value", "value_original"),
+            ("time_value", "time_value", "time_value_original"),
+        ):
+            if not same_number(raw[raw_key], row[catalog_key]):
+                raise ValueError(
+                    f"Divergencia de {field} entre CSV bruto e base harmonizada em "
+                    f"{source_id}; regenere com tools/harmonize_literature.py."
+                )
+        if row["evidence_class"] != "QUANTITATIVE_MEASUREMENT":
+            raise ValueError(f"{source_id} deve ser QUANTITATIVE_MEASUREMENT na base harmonizada.")
+    catalog_measurement_ids = {sid for sid in catalog["source_record_id"] if "|L" in sid}
+    if catalog_measurement_ids != expected_measurement_ids:
+        raise ValueError(
+            "A base harmonizada nao corresponde 1:1 as medicoes de "
+            "literature_measurements.csv; regenere com tools/harmonize_literature.py."
+        )
+
+    raw_evidence = pd.read_csv(evidence_path, dtype=str, keep_default_na=False)
+    for line_number, raw in enumerate(raw_evidence.to_dict("records"), start=2):
+        if not any(str(value).strip() for value in raw.values()):
+            continue
+        source_id = f"{raw['study_id']}|E{line_number}"
+        row = by_source.get(source_id)
+        if row is None:
+            raise ValueError(
+                f"Base harmonizada nao contem a evidencia {source_id}; "
+                "regenere com tools/harmonize_literature.py."
+            )
+        for field in ("study_id", "evidence_type", "evidence_text"):
+            if not same_text(raw[field], row[field]):
+                raise ValueError(
+                    f"Divergencia entre CSV bruto e base harmonizada em {source_id} "
+                    f"({field}); regenere com tools/harmonize_literature.py."
+                )
+        for field in ("k_value", "half_life", "value"):
+            raw_number = str(raw[field]).strip()
+            catalog_key = "value_original" if field == "value" else field
+            catalog_number = str(row[catalog_key]).strip()
+            if raw_number and not same_number(raw_number, catalog_number):
+                raise ValueError(
+                    f"Divergencia de {field} entre CSV bruto e base harmonizada em "
+                    f"{source_id}; regenere com tools/harmonize_literature.py."
+                )
+            if not raw_number and catalog_number:
+                raise ValueError(
+                    f"Campo {field} presente na base mas ausente no bruto em {source_id}; "
+                    "regenere com tools/harmonize_literature.py."
+                )
+
+
+def split_literature_views(catalog: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Particiona o catalogo harmonizado nas visoes cientificas do projeto."""
+    if "verification_status" not in catalog.columns:
+        raise ValueError("O catalogo precisa da coluna verification_status para separar visoes.")
+    views: dict[str, pd.DataFrame] = {}
+    for view_name in LITERATURE_VIEWS:
+        allowed = VIEW_STATUS_SETS[view_name]
+        selected = catalog.loc[catalog["verification_status"].isin(allowed)].copy()
+        views[view_name] = selected.reset_index(drop=True)
+    return views
+
+
+def adapt_measurements_for_analysis(series_rows: pd.DataFrame) -> pd.DataFrame:
+    """Adapta linhas quantitativas do catalogo ao esquema exigido pelos modelos."""
+    if "evidence_class" in series_rows.columns:
+        foreign = sorted(set(series_rows["evidence_class"].astype(str)) - {"QUANTITATIVE_MEASUREMENT"})
+        if foreign:
+            raise ValueError(
+                "Somente QUANTITATIVE_MEASUREMENT entra nos ajustes; "
+                f"classes incompativeis recebidas: {foreign}."
+            )
+    mapping = {
+        "value_original": "value",
+        "unit_original": "value_unit",
+        "time_value_original": "time_value",
+        "time_unit_original": "time_unit",
+        "matrix_type": "matrix",
+        "source_locator": "source_location",
+    }
+    adapted = series_rows.copy()
+    for source_column, target_column in mapping.items():
+        if source_column in adapted.columns:
+            adapted[target_column] = adapted[source_column]
+    numeric_columns(adapted, [
+        "value", "time_value", "temperature_c", "pH",
+        "additive_concentration_pct", "standard_deviation", "replicate_count",
+    ])
+    missing = set(ANALYSIS_MEASUREMENT_COLUMNS) - set(adapted.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes para analise quantitativa: {sorted(missing)}.")
+    return adapted.reindex(columns=ANALYSIS_MEASUREMENT_COLUMNS)
+
+
+def _series_eligible_mask(fit_input: pd.DataFrame) -> pd.Series:
+    """Replica os criterios de elegibilidade dos ajustes por serie compativel."""
+    values = pd.to_numeric(fit_input["value"], errors="coerce")
+    times = pd.to_numeric(fit_input["time_value"], errors="coerce")
+    group_codes, _ = pd.factorize(
+        fit_input[SERIES_GROUP_KEYS].fillna("").astype(str).agg("|".join, axis=1), sort=False
+    )
+    frame = pd.DataFrame({"_value": values.to_numpy(), "_time": times.to_numpy(), "_code": group_codes})
+    eligible_codes: dict[int, bool] = {}
+    for code, group in frame.groupby("_code", sort=False):
+        eligible_codes[int(code)] = bool(
+            group["_value"].notna().all() and (group["_value"] > 0).all()
+            and group["_time"].notna().all() and group["_time"].nunique() >= 3
+        )
+    per_group_units: dict[int, bool] = {}
+    work = fit_input.assign(_code=group_codes)
+    for code, group in work.groupby("_code", sort=False):
+        per_group_units[int(code)] = bool(
+            group["time_unit"].nunique() == 1 and group["value_unit"].nunique() == 1
+        )
+    mask = [
+        eligible_codes[int(code)] and per_group_units[int(code)]
+        for code in group_codes
+    ]
+    return pd.Series(mask, index=fit_input.index)
+
+
+def build_inclusion_exclusion_summary(
+    catalog: pd.DataFrame,
+    view_name: str,
+    selected: pd.DataFrame,
+    fit_input: pd.DataFrame,
+) -> pd.DataFrame:
+    """Resume inclusao/exclusao por visao com motivos explicitos auditaveis."""
+    if view_name not in LITERATURE_VIEWS:
+        raise ValueError(f"Visao desconhecida: {view_name}.")
+    eligible_count = int(_series_eligible_mask(fit_input).sum()) if not fit_input.empty else 0
+    total_by_status = catalog["verification_status"].value_counts().to_dict()
+    total_by_class = catalog["evidence_class"].value_counts().to_dict()
+    selected_by_class = selected["evidence_class"].value_counts().to_dict() if not selected.empty else {}
+    quantitative_selected = int(selected_by_class.get("QUANTITATIVE_MEASUREMENT", 0))
+    rows = [
+        ("catalog", "TOTAL_CATALOG_OBSERVATIONS", len(catalog),
+         "Linhas da base harmonizada (derivada reproduzivel dos CSVs brutos)."),
+        ("catalog", "STATUS_VERIFIED", int(total_by_status.get("VERIFIED", 0)),
+         "Observacoes VERIFIED no catalogo."),
+        ("catalog", "STATUS_VERIFICATION_PENDING", int(total_by_status.get("VERIFICATION_PENDING", 0)),
+         "Observacoes VERIFICATION_PENDING no catalogo."),
+        ("catalog", "STATUS_REJECTED", int(total_by_status.get("REJECTED", 0)),
+         "Observacoes REJECTED no catalogo (preservadas, nunca ajustadas)."),
+        ("view", "INCLUDED_IN_VIEW", len(selected),
+         f"Observacoes com status em {sorted(VIEW_STATUS_SETS[view_name])} na visao '{view_name}'."),
+        ("view", "EXCLUDED_BY_STATUS", len(catalog) - len(selected),
+         "Observacoes fora do conjunto de status da visao."),
+        ("class", "EVIDENCE_CLASS_QUANTITATIVE", int(total_by_class.get("QUANTITATIVE_MEASUREMENT", 0)),
+         "Medicoes quantitativas no catalogo (inclui quantitativas transcritas de evidence)."),
+        ("class", "EVIDENCE_CLASS_PUBLISHED_KINETIC", int(total_by_class.get("PUBLISHED_KINETIC_PARAMETER", 0)),
+         "Parametros k/meia-vida publicados; nunca viram serie temporal."),
+        ("class", "EVIDENCE_CLASS_QUALITATIVE", int(total_by_class.get("QUALITATIVE_NARRATIVE", 0)),
+         "Narrativas qualitativas; nunca misturadas com medicoes numericas."),
+        ("fit", "EXCLUDED_NOT_QUANTITATIVE", len(selected) - quantitative_selected,
+         "Linhas da visao fora de QUANTITATIVE_MEASUREMENT (parametros/narrativas)."),
+        ("fit", "ELIGIBLE_FOR_FIT", eligible_count,
+         "Medicoes quantitativas em series compativeis (>=3 tempos, unidade unica)."),
+        ("fit", "EXCLUDED_NO_TIME_SERIES", quantitative_selected - eligible_count,
+         "Quantitativas sem serie ajustavel (tempo ausente, <3 tempos ou unidade mista)."),
+    ]
+    if view_name == "rejected":
+        rows.append(("policy", "EXCLUDED_REJECTED_POLICY", len(selected),
+                     "Visao rejected: registros preservados com motivo; excluidos de ajuste por padrao."))
+    blocked_details: list[str] = []
+    if not fit_input.empty:
+        pooled_units = sorted({str(value) for value in fit_input["value_unit"].dropna().astype(str)})
+        pooled_times = sorted({str(value) for value in fit_input["time_unit"].dropna().astype(str)})
+        pooled_matrices = sorted({str(value) for value in fit_input["matrix"].dropna().astype(str)})
+        blocked_details.append(
+            "Curva unica entre estudos bloqueada: unidades "
+            f"{pooled_units}, escalas {pooled_times}, matrizes {pooled_matrices}; "
+            "ajustes somente dentro de grupos compativeis."
+        )
+    rows.append(("comparability", "CROSS_STUDY_POOLING_BLOCKED", len(blocked_details),
+                 "; ".join(blocked_details) if blocked_details else "Sem insumo quantitativo nesta visao."))
+    return pd.DataFrame(rows, columns=["stage", "reason", "count", "detail"])
+
+
+def analyze_literature(
+    root: Path,
+    include_pending: bool = False,
+    view: str | None = None,
+) -> None:
+    """Analisa a literatura a partir da base harmonizada, por visao cientifica."""
+    resolved_view = view or ("combined" if include_pending else "verified")
+    if resolved_view not in LITERATURE_VIEWS:
+        raise ValueError(f"Visao desconhecida: {resolved_view}. Use uma de {list(LITERATURE_VIEWS)}.")
+    if include_pending and resolved_view in ("verified", "rejected"):
+        raise ValueError("include_pending=True exige a visao 'combined' (ou 'pending').")
+    exploratory = resolved_view in ("pending", "combined")
+
     lit_dir = root / "data" / "literature"
-    out_dir = root / "data" / "literature" / "processed"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    studies, measurements, evidence = validate_literature_data(root)
-    
-    measurements_with_retention = calculate_literature_retention(measurements)
-    kinetics = fit_literature_kinetics(measurements)
-    
-    series_plot = plot_literature_series(measurements, out_dir)
-    retention_plot = plot_literature_retention(measurements_with_retention, out_dir)
-    
-    measurements_with_retention.to_csv(out_dir / "literature_measurements_with_retention.csv", index=False)
-    kinetics.to_csv(out_dir / "literature_kinetics.csv", index=False)
-    
+    out_root = lit_dir / "processed"
+    view_dir = out_root / "views" / VIEW_DIR_NAMES[resolved_view]
+    view_dir.mkdir(parents=True, exist_ok=True)
+
+    catalog = load_harmonized_catalog(root)
+    views = split_literature_views(catalog)
+    selected = views[resolved_view]
+
+    studies_path = lit_dir / "literature_studies.csv"
+    if not studies_path.exists():
+        raise FileNotFoundError(f"Arquivo de literatura nao encontrado: {studies_path}. Execute init primeiro.")
+    studies = pd.read_csv(studies_path)
+    missing_study_columns = set(LITERATURE_STUDY_COLUMNS) - set(studies.columns)
+    if missing_study_columns:
+        raise ValueError(
+            "Colunas obrigatorias ausentes em literature_studies.csv: " + ", ".join(sorted(missing_study_columns))
+        )
+    if studies.empty:
+        raise ValueError("literature_studies.csv esta vazio.")
+
+    pending_total = int(catalog["verification_status"].eq("VERIFICATION_PENDING").sum())
+    if resolved_view == "verified":
+        warnings.warn(
+            f"{pending_total} registros VERIFICATION_PENDING foram excluidos da analise aprovada.",
+            UserWarning,
+            stacklevel=2,
+        )
+    elif exploratory:
+        warnings.warn(
+            f"Analise exploratoria '{resolved_view}' inclui {len(selected)} registros "
+            "VERIFICATION_PENDING; eles nao sao benchmarks aprovados.",
+            UserWarning,
+            stacklevel=2,
+        )
+    else:
+        warnings.warn(
+            "Visao 'rejected': registros preservados com motivo e excluidos de ajuste por padrao.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    quantitative = selected.loc[selected["evidence_class"] == "QUANTITATIVE_MEASUREMENT"].copy()
+    published_params = selected.loc[selected["evidence_class"] == "PUBLISHED_KINETIC_PARAMETER"].copy()
+    narratives = selected.loc[selected["evidence_class"] == "QUALITATIVE_NARRATIVE"].copy()
+    series_source = quantitative.loc[quantitative["source_record_id"].str.contains("|L", regex=False)].copy()
+    if resolved_view == "rejected":
+        series_source = series_source.iloc[0:0].copy()
+    fit_input = adapt_measurements_for_analysis(series_source)
+    fit_input["analysis_view"] = resolved_view
+
+    measurements_with_retention = calculate_literature_retention(fit_input)
+    kinetics = fit_literature_kinetics(fit_input, include_pending=exploratory)
+    if kinetics.empty:
+        kinetics = kinetics.reindex(columns=LITERATURE_FIT_COLUMNS)
+    else:
+        kinetics["analysis_view"] = resolved_view
+    model_comparison = compare_literature_kinetic_models(fit_input, studies, include_pending=exploratory)
+    if not model_comparison.empty:
+        model_comparison["analysis_view"] = resolved_view
+    parameter_uncertainty = estimate_literature_kinetic_parameter_uncertainty(model_comparison)
+    concentration_uncertainty = estimate_literature_kinetic_concentration_intervals(model_comparison)
+
+    summary = build_inclusion_exclusion_summary(catalog, resolved_view, selected, fit_input)
+    series_plot = plot_literature_series(fit_input, view_dir)
+    retention_plot = plot_literature_retention(measurements_with_retention, view_dir)
+
+    selected.to_csv(view_dir / "catalog_view.csv", index=False)
+    quantitative.to_csv(view_dir / "quantitative_measurements.csv", index=False)
+    published_params.to_csv(view_dir / "published_kinetic_parameters.csv", index=False)
+    narratives.to_csv(view_dir / "qualitative_narrative_evidence.csv", index=False)
+    measurements_with_retention.to_csv(view_dir / "literature_measurements_with_retention.csv", index=False)
+    kinetics.to_csv(view_dir / "literature_kinetics.csv", index=False)
+    model_comparison.to_csv(view_dir / "literature_kinetic_model_comparison.csv", index=False)
+    parameter_uncertainty.to_csv(view_dir / "literature_kinetic_parameter_uncertainty.csv", index=False)
+    concentration_uncertainty.to_csv(view_dir / "literature_kinetic_concentration_uncertainty.csv", index=False)
+    summary.to_csv(view_dir / "inclusion_exclusion_summary.csv", index=False)
+
+    legacy_targets = {
+        "literature_measurements_with_retention.csv": measurements_with_retention,
+        "literature_kinetics.csv": kinetics,
+        "literature_kinetic_model_comparison.csv": model_comparison,
+        "literature_kinetic_parameter_uncertainty.csv": parameter_uncertainty,
+        "literature_kinetic_concentration_uncertainty.csv": concentration_uncertainty,
+        "inclusion_exclusion_summary.csv": summary,
+    }
+    for name, frame in legacy_targets.items():
+        frame.to_csv(out_root / name, index=False)
+    for png_name, source in (("literature_time_series.png", series_plot), ("literature_retention.png", retention_plot)):
+        legacy_png = out_root / png_name
+        if source is not None and Path(source).exists():
+            shutil.copyfile(source, legacy_png)
+        elif legacy_png.exists():
+            legacy_png.unlink()
+
     images = []
     if series_plot:
-        images.append(("Séries temporais da literatura", series_plot))
+        images.append(("Series temporais da literatura", series_plot))
     if retention_plot:
-        images.append(("Retenção calculada", retention_plot))
-    
-    title = "Análise de literatura — estabilidade de antocianinas"
-    notice = ("Esta análise resume apenas dados publicados. Cada série é separada por tratamento, matriz, "
-              "variável e unidade; não misture resultados com data/raw nem use literatura automaticamente no ML. "
-              "Retenção e ajustes cinéticos são cálculos identificados nas saídas.")
-    
+        images.append(("Retencao calculada", retention_plot))
+
+    eligible = int(summary.loc[summary["reason"] == "ELIGIBLE_FOR_FIT", "count"].iloc[0])
+    scope_phrase = {
+        "verified": "Visao VERIFICADA (analysis_view='verified'): apenas registros VERIFIED; sem fallback para pendentes.",
+        "pending": "Visao PENDENTE EXPLORATORIA (analysis_view='pending'): VERIFICATION_PENDING ainda nao confirmados.",
+        "rejected": "Visao REJEITADA (analysis_view='rejected'): registros preservados com motivo; excluidos de ajuste.",
+        "combined": "Visao COMBINADA EXPLORATORIA (analysis_view='combined'): VERIFIED + PENDING; REJECTED excluido.",
+    }[resolved_view]
+    count_phrase = (
+        f"Catalogo: {len(catalog)} observacoes; incluidas nesta visao: {len(selected)}; "
+        f"quantitativas na visao: {len(quantitative)}; elegiveis para ajuste: {eligible}; "
+        f"parametros publicados: {len(published_params)}; narrativas: {len(narratives)}."
+    )
+    empty_phrase = ""
+    if fit_input.empty or eligible == 0:
+        empty_phrase = " Nenhuma serie elegivel nesta visao; saidas vazias validas."
+    notice = (
+        "Esta analise resume apenas dados publicados e le a BASE HARMONIZADA DERIVADA "
+        "(os CSVs brutos continuam sendo as fontes; a base e conferida linha a linha). "
+        "Cada serie e separada por tratamento, matriz, variavel e unidade; "
+        "nao misture resultados com data/raw nem use literatura automaticamente no ML. "
+        "Retencao e ajustes cineticos sao calculos identificados nas saidas. "
+        + scope_phrase + " " + count_phrase + empty_phrase
+    )
+    title = f"Analise de literatura [{resolved_view}] - estabilidade de antocianinas"
     generate_html_report(
         title,
         notice,
         [("Estudos registrados", studies),
-         ("Medições quantitativas", measurements_with_retention),
-         ("Resumos cinéticos e evidências qualitativas", evidence),
-         ("Ajustes cinéticos exploratórios", kinetics)],
+         ("Resumo de inclusao/exclusao", summary),
+         ("Medicoes quantitativas (visao)", measurements_with_retention),
+         ("Parametros cineticos publicados (nao ajustados)", published_params),
+         ("Evidencias qualitativas/narrativas", narratives),
+         ("Ajustes cineticos", kinetics)],
         images,
-        out_dir / "literature_report.html"
+        view_dir / "literature_report.html",
     )
-    
-    print(f"Análise de literatura concluída. Resultados em: {out_dir.resolve()}")
-    print(f"Relatório HTML: {(out_dir / 'literature_report.html').resolve()}")
-    print("AVISO: dados de literatura são de artigos publicados; não substituem medições próprias.")
+    shutil.copyfile(view_dir / "literature_report.html", out_root / "literature_report.html")
+
+    print(f"Analise de literatura [{resolved_view}] concluida. Resultados em: {view_dir.resolve()}")
+    print(f"Relatorio HTML: {(view_dir / 'literature_report.html').resolve()}")
+    print("AVISO: dados de literatura sao de artigos publicados; nao substituem medicoes proprias.")
+    if exploratory:
+        print("AVISO EXPLICITO: analise exploratoria inclui registros VERIFICATION_PENDING.")
+    if resolved_view == "verified" and (fit_input.empty or eligible == 0):
+        print(f"AVISO: {pending_total} registros VERIFICATION_PENDING excluidos da analise aprovada.")
 
 
 def generate_experimental_plan(root: Path, concentrations: list[float] | None = None) -> None:
@@ -1452,6 +2812,14 @@ def main() -> int:
     )
     literature_parser = subparsers.add_parser("literature", help="Analisar dados de literatura e gerar relatório HTML")
     literature_parser.add_argument("--dir", type=Path, default=Path.cwd(), help="Pasta do projeto (padrão: pasta atual)")
+    literature_parser.add_argument(
+        "--include-pending", action="store_true",
+        help="Incluir linhas VERIFICATION_PENDING somente para exploração, com aviso explícito",
+    )
+    literature_parser.add_argument(
+        "--view", choices=list(LITERATURE_VIEWS), default=None,
+        help="Visão científica da base harmonizada (padrão: verified; --include-pending equivale a combined)",
+    )
     plan_parser = subparsers.add_parser("plan", help="Gerar plano experimental para hipótese de estabilização")
     plan_parser.add_argument("--dir", type=Path, default=Path.cwd(), help="Pasta do projeto (padrão: pasta atual)")
     plan_parser.add_argument("--concentrations", type=float, nargs="+", default=[0.1, 0.2, 0.4, 0.6],
@@ -1467,7 +2835,7 @@ def main() -> int:
         elif args.command == "ml":
             train_ml_model(args.dir, target=args.target, include_literature=args.include_literature)
         elif args.command == "literature":
-            analyze_literature(args.dir)
+            analyze_literature(args.dir, include_pending=args.include_pending, view=args.view)
         elif args.command == "plan":
             generate_experimental_plan(args.dir, concentrations=args.concentrations)
     except (ValueError, FileNotFoundError, pd.errors.ParserError) as exc:

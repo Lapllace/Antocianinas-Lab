@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Relatório de validação — Anthocyanin Lab</title>
+<style>
+body { font-family: Arial, sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #222; }
+h1, h2 { border-bottom: 1px solid #bbb; padding-bottom: .25rem; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #bbb; padding: .45rem .7rem; text-align: left; }
+.pending { color: #7a5200; font-weight: bold; }
+.warning { padding: .8rem; border-left: 4px solid #b7791f; background: #fff8e6; }
+code, pre { background: #f3f3f3; padding: .15rem .3rem; }
+</style>
+</head>
+<body>
+<h1>Relatório de validação — Anthocyanin Lab</h1>
+<p><strong>Branch:</strong> <code>feature/scientific-skills-integration</code><br>
+<strong>Escopo:</strong> reconciliação dos relatórios e validação de software; não é aprovação científica integral.</p>
+
+<h2>Resultado resumido</h2>
+<p>Os resultados distinguem testes de software, reprodução matemática e confirmação bibliográfica. Passar nos testes ou reproduzir uma operação aritmética não confirma, por si só, a publicação ou sua localização. Huțuțui (2026), Muhamad (2022), Lin (2023) e Pan (2021) permanecem com verificação da fonte pendente onde indicado nos arquivos de auditoria. Portanto, a validação científica integral <strong>não está aprovada</strong>.</p>
+
+<h2>Testes de software</h2>
+<table>
+<thead><tr><th>Arquivo de testes</th><th>Testes descobertos</th></tr></thead>
+<tbody>
+<tr><td><code>test_analysis.py</code></td><td>14</td></tr>
+<tr><td><code>test_persistence.py</code></td><td>14</td></tr>
+<tr><td><code>test_scientific_validation.py</code></td><td>37</td></tr>
+<tr><th>Total</th><th>65</th></tr>
+</tbody>
+</table>
+<p>A contagem caiu de 70 para 65: cinco testes líquidos a menos resultam da substituição de testes antigos por testes funcionais ligados ao código de produção. A contagem atual de testes científicos é 37, não 42. O resultado da suíte completa é evidência de software, não confirmação bibliográfica.</p>
+<p><strong>Execução desta revisão:</strong> <code>65 passed, 13 subtests passed</code> em 15.46 s, com Python 3.13.3 e pytest 9.1.1.</p>
+
+<h2>Reprodução matemática e resultados derivados</h2>
+<ul>
+<li><code>numerical_benchmarks.csv</code> separa <code>calculation_status</code> de <code>source_verification_status</code>. Para Lin, <code>ln(2) / 0.0466</code> reproduz a meia-vida publicada de 14.87 dias dentro da tolerância declarada; a localização no artigo continua pendente. Os demais valores de Lin e Pan são mantidos como reportados, sem declarar recálculo ou confirmação da fonte.</li>
+<li><code>kinetic_reproduction.csv</code> contém ajustes exploratórios, não validação dos valores de entrada. As três séries <code>STUDY_B</code> preservam <code>time_unit=mes</code>; não há conversão implícita para dias.</li>
+<li>Os valores nos relatórios não constituem evidência experimental. Dados de literatura continuam separados de medições laboratoriais e simulações.</li>
+</ul>
+
+<h2>Auditoria bibliográfica e fixtures</h2>
+<p><code>literature_audit.csv</code> foi reconciliado com as 39 linhas do arquivo preservado <code>data/literature/literature_measurements.csv</code> por estudo, DOI, tratamento, tempo/unidade, variável e unidade do valor. Foram corrigidos no relatório 25 valores divergentes: 11 linhas associadas a Huțuțui/P8, P9, P13 e P14 e 14 associadas a Muhamad/GLASS e METAL_CAN. Os valores sincronizados refletem o CSV local preservado; isso <strong>não</strong> confirma que correspondam ao artigo primário.</p>
+<p>As 39 linhas permanecem <code>VERIFICATION_PENDING</code>. Os fixtures Huțuțui e Muhamad também permanecem pendentes. Não se substituíram dados de Muhamad (2022) pelos do artigo de 2023, nem se inferiu equivalência entre publicações. Consulte <code>discrepancy_reconciliation.md</code> para o registro das discrepâncias já documentadas.</p>
+
+<h2>ML</h2>
+<p>O status permanece <code>ML_NOT_VALIDATED</code>: não há evidência independente suficiente de generalização. O código registra MAE, RMSE, R² e resíduos por observação, mas não calcula uma métrica explícita de viés médio. Resíduo individual não equivale a viés médio.</p>
+
+<h2>Integridade dos arquivos</h2>
+<p><code>tools/verify_validation_hashes.ps1</code> compara individualmente cada arquivo do manifesto <code>backups/validation_audit_20261016_085744/SHA256SUMS.txt</code> com o SHA-256 esperado e imprime <code>MATCH</code> ou <code>MISMATCH</code>. Os CSVs originais protegidos de <code>data/raw/</code> e <code>data/literature/</code> devem corresponder ao manifesto. Alterações de código intencionais podem divergir do backup: registre o resultado, mas não atualize os hashes esperados para ocultar a divergência.</p>
+<p><strong>Resultado da conferência:</strong> 7 arquivos <code>MATCH</code>; 1 <code>MISMATCH</code> intencional em <code>anthocyanin_lab.py</code> (esperado <code>EF02F742427FB35D09E9609F3658A59EF52EBECD799DB704840A0AE8D64D4066</code>, atual <code>81BBA55E1698363BF2A2871620CB040214ED49F5D4FCE24EB2D52482A12EED4C</code>). Os arquivos originais de <code>data/raw/</code> e <code>data/literature/</code> listados no manifesto retornaram <code>MATCH</code>. Por causa do arquivo de código modificado, o verificador termina com código 1; o manifesto foi preservado.</p>
+<pre><code>.\tools\verify_validation_hashes.ps1</code></pre>
+
+<h2>Limitações e decisão</h2>
+<ul>
+<li>Localizações no artigo primário permanecem por confirmar; linhas pendentes não são benchmarks bibliograficamente aprovados.</li>
+<li>A cinética de primeira ordem e ΔE CIE76 são análises exploratórias; não determinam prazo de validade nem segurança.</li>
+<li><code>ML_NOT_VALIDATED</code> permanece até existir evidência independente apropriada.</li>
+<li>Nenhuma conclusão experimental pode ser extraída de simulações ou de dados bibliográficos pendentes.</li>
+</ul>
+<p class="warning"><strong>Decisão:</strong> testes de software e cálculos reproduzíveis podem ser relatados separadamente. A validação científica integral continua pendente; não autoriza declarar as fontes verificadas nem mesclar enquanto as discrepâncias bloqueantes permanecerem.</p>
+</body>
+</html>
