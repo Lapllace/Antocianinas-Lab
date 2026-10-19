@@ -50,3 +50,35 @@ O carregador deve rejeitar estados desconhecidos, chaves sem correspondência, d
 - Crossref, registro DOI 10.33102/mjosht.v8i1.239: <https://api.crossref.org/works/10.33102/mjosht.v8i1.239>
 - Crossref, registro DOI 10.26656/fr.2017.6(S2).030: <https://api.crossref.org/works/10.26656/fr.2017.6(S2).030>
 - Páginas/editor e suplementos primários foram solicitados, mas não ficaram acessíveis no ambiente durante esta revisão; localização primária permanece pendente.
+- Páginas/editor e suplementos primários foram solicitados, mas não ficaram acessíveis no ambiente durante esta revisão; localização primária permanece pendente.
+
+## Reconciliação com a auditoria da Fase 1 (2026-10-18)
+
+Comparação entre este relatório (inspeção de 2026-10-16) e `data/literature/VERIFICATION_AUDIT_PHASE1.md` (auditoria de 2026-10-17; as duas cópias do audit em `data/literature/` e `referências/` são byte a byte idênticas, SHA-256 conferido em 2026-10-18).
+
+### Divergências aparentes e como foram resolvidas
+
+1. **Acessibilidade da fonte primária.** Este relatório registrou HTTP 403 para texto integral e suplementos de Huțuțui. A auditoria posterior obteve os valores por trechos indexados do próprio domínio editorial (narrativa do artigo) e o texto integral de Muhamad 2022 por conteúdo disponibilizado pelo autor (ResearchGate). A situação avançou de "nenhuma localização primária" (2026-10-16) para "confirmação primária parcial" (Huțuțui) e "tabela confirmada no texto integral" (Muhamad 2022), sem contradição: as pendências de localização página/tabela/exata permanecem.
+2. **Direção do alinhamento dos fixtures Huțuțui.** A seção Huțuțui deste relatório propôs alinhar os 11 pontos conflitantes do fixture ao CSV preservado. A auditoria de 2026-10-17 transcreveu da narrativa do artigo exatamente os valores do CSV (P8 97,179/91,940; P9 72,678/59,587/49,249; P13 74,273/44,663/38,482; P14 74,798/58,212/49,402), e não os valores antigos do fixture (97,100; 116,800; 116,900; 116,700; ...). A direção do alinhamento está correta e é corroborada pela fonte primária. Verificado novamente em 2026-10-18: fixtures `hututui_2026_audit.csv` e `muhamad_2022_audit.csv` sem divergências vs CSVs de origem.
+3. **Registro bibliográfico de 2023.** Este relatório propôs "um registro bibliográfico separado para o DOI de 2023 aguarda confirmação documental da relação e da tabela original". A auditoria forneceu a evidência documental (Tabela 2 do artigo de 2023 idêntica à Tabela 8 do de 2022: 21 médias e todos os desvios-padrão coincidem). `STUDY_F` foi registrado em `literature_studies.csv` com DOI `10.26656/fr.2017.6(S2).030` e a relação `STUDY_B → STUDY_F` foi gravada em `relations_overlapping_publications.csv` como **possível sobreposição de dados, sujeita a confirmação documental da relação editorial** — não como replicação independente, exatamente como ambos os relatórios exigem. Nenhum valor foi migrado entre as publicações.
+4. **Lin et al. (2023).** Não coberto por este relatório. A auditoria confirma apenas o nível do resumo editorial (`k = 0,0466 d⁻¹`, `t½ = 14,87 d`, consistentes por `ln(2)/k`); texto integral, tabela e condições seguem pendentes. A pendência é registrada aqui como extensão do mesmo princípio: sem texto integral, sem `VERIFIED`.
+
+### Pendências novas trazidas pela auditoria (registradas, não resolvidas)
+
+- Série de Huțuțui contém dias 1, 5 e 10; o método do artigo declara dias 1, 2, 3, 4, 5 e 10. Dias 2–4 ausentes no repositório; não estimar.
+- Inconsistência 510 nm (métodos) vs 520 nm (equação) no artigo de Huțuțui; não corrigir silenciosamente.
+- Discrepância aritmética interna de P2: `k = 0,0112 d⁻¹` implicaria `t½ ≈ 61,9 d`, mas o artigo publica `60,5 d`. Manter ambos, com nota.
+- Possível lapso editorial na descrição da Figura 9 (P4/P9 "room temperature" vs legenda "4 °C").
+- Discrepância de DOI de Muhamad 2022: impresso no PDF `10.33102/2022239` vs página editorial `10.33102/mjosht.v8i1.239` (canônico provisório: página editorial; conservar a nota).
+
+### Estado dos registros após a reconciliação (verificado em 2026-10-18)
+
+- Nenhuma observação foi promovida a `VERIFIED`; todas seguem `VERIFICATION_PENDING` em `literature_verification_status.csv`.
+- CSVs bibliográficos originais inalterados vs HEAD (verificado por `git diff --exit-code`); a única alteração autorizada em `data/literature/` é a inclusão da linha `STUDY_F` em `literature_studies.csv` (+1 linha), conforme previsão do item 3 acima.
+- SHA-256 dos quatro CSVs brutos em 2026-10-18:
+  - `literature_measurements.csv`: `159CE435A35A1BE17BDCB6488F41D7CC83E103B06308EC40EFAE84EBBE2ED351`
+  - `literature_evidence.csv`: `F4728FB936B5F4335A1CED03D4E8875E1B5AF781AE311FCEDB0CD152C0ED1DE4`
+  - `literature_verification_status.csv`: `831B1FFEC7399007A819038348348DEE61E1112169AF2D347C0601385528759E`
+  - `literature_studies.csv` (com STUDY_F): `DE52A87CBA1532ADF2A100D0E3CB9A8C42FF36A01B4C6AF906A874D8CB098E19`
+- Bloqueio estrutural mantido: os 39 valores de `source_location` em `literature_measurements.csv` continuam com texto genérico ("Localização exata no artigo pendente de conferência"); a promoção a `VERIFIED` exige acesso ao texto integral, que não depende de alteração de código.
+

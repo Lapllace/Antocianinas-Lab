@@ -1,0 +1,1 @@
+study_id,treatment_id,matrix,measurement,value_unit,time_unit,solvent,temperature_c,light_condition,oxygen_condition,package_material,pH,additive,additive_concentration_pct,n_timepoints,k_per_time_unit,half_life_time_unit,r_squared,residual_rmse_log,residual_rmse_value,fit_method,data_origin,reported_or_calculated,source_url,doi,source_location,verification_status,fit_note

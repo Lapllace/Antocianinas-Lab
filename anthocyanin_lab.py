@@ -22,6 +22,7 @@ import colorsys
 import html
 import json
 import math
+import shutil
 import sys
 import warnings
 from pathlib import Path
@@ -66,6 +67,75 @@ LITERATURE_STATUS_KEY = [
     "study_id", "doi", "treatment_id", "time_value", "time_unit", "measurement", "value_unit",
 ]
 LITERATURE_VERIFICATION_STATUSES = {"VERIFIED", "VERIFICATION_PENDING", "REJECTED"}
+
+# --- Integracao Fase 3: classes de evidencia, visoes e base harmonizada ---
+LITERATURE_EVIDENCE_CLASSES = {
+    "QUANTITATIVE_MEASUREMENT",
+    "PUBLISHED_KINETIC_PARAMETER",
+    "QUALITATIVE_NARRATIVE",
+}
+LITERATURE_VIEWS = ("verified", "pending", "rejected", "combined")
+VIEW_STATUS_SETS = {
+    "verified": frozenset({"VERIFIED"}),
+    "pending": frozenset({"VERIFICATION_PENDING"}),
+    "rejected": frozenset({"REJECTED"}),
+    "combined": frozenset({"VERIFIED", "VERIFICATION_PENDING"}),
+}
+VIEW_DIR_NAMES = {
+    "verified": "verified",
+    "pending": "pending_exploratory",
+    "rejected": "rejected",
+    "combined": "combined_exploratory",
+}
+HARMONIZED_CATALOG_RELATIVE = Path(
+    "data/literature/processed/harmonized/harmonized_measurements.csv"
+)
+HARMONIZED_REQUIRED_COLUMNS = [
+    "execution_id", "generated_on_utc", "observation_id", "source_record_id",
+    "study_id", "treatment_id", "measurement", "value_original", "unit_original",
+    "time_value_original", "time_unit_original", "doi", "source_url",
+    "source_version", "source_locator", "source_locator_class", "provenance_class",
+    "verification_status", "verification_note", "matrix_type", "species",
+    "extraction_method", "solvent", "solvent_composition", "additive",
+    "additive_concentration_pct", "pH", "temperature_c", "light_condition",
+    "oxygen_condition", "package_material", "storage_conditions",
+    "measurement_name", "standard_deviation", "replicate_count", "replicate_type",
+    "normalization_formula", "normalized_value", "normalized_unit",
+    "comparability_group", "exclusion_reason", "evidence_class", "evidence_type",
+    "evidence_text", "k_value", "k_unit", "half_life", "half_life_unit", "formula",
+    "data_origin", "reported_or_calculated", "notes",
+]
+ANALYSIS_MEASUREMENT_COLUMNS = [
+    "study_id", "treatment_id", "source_url", "doi", "source_location", "matrix",
+    "measurement", "value", "value_unit", "time_value", "time_unit", "solvent",
+    "temperature_c", "light_condition", "oxygen_condition", "package_material",
+    "pH", "additive", "additive_concentration_pct", "data_origin",
+    "reported_or_calculated", "verification_status", "verification_note",
+    "observation_id", "source_record_id", "evidence_class", "provenance_class",
+    "comparability_group", "exclusion_reason", "standard_deviation",
+    "replicate_count", "notes",
+]
+SERIES_GROUP_KEYS = [
+    "study_id", "treatment_id", "matrix", "measurement", "value_unit", "time_unit",
+    "solvent", "temperature_c", "light_condition", "oxygen_condition",
+    "package_material", "pH", "additive", "additive_concentration_pct",
+]
+LITERATURE_FIT_COLUMNS = SERIES_GROUP_KEYS + [
+    "n_timepoints", "k_per_time_unit", "half_life_time_unit", "r_squared",
+    "residual_rmse_log", "residual_rmse_value", "fit_method", "data_origin",
+    "reported_or_calculated", "source_url", "doi", "source_location",
+    "verification_status", "fit_note",
+]
+LEGACY_OUTPUT_NAMES = [
+    "literature_measurements_with_retention.csv",
+    "literature_kinetics.csv",
+    "literature_kinetic_model_comparison.csv",
+    "literature_kinetic_parameter_uncertainty.csv",
+    "literature_kinetic_concentration_uncertainty.csv",
+    "literature_report.html",
+    "literature_time_series.png",
+    "literature_retention.png",
+]
 
 LITERATURE_STUDY_COLUMNS = [
     "study_id", "citation", "title", "doi", "url", "species", "matrix",
@@ -338,6 +408,54 @@ def add_hsv_and_delta_e(frame: pd.DataFrame) -> pd.DataFrame:
     else:
         df["delta_e_cie76_vs_day0"] = np.nan
     return df
+
+
+def srgb_to_cielab(r: float, g: float, b: float) -> tuple:
+    """Converte RGB sRGB (0-255) para coordenadas CIELAB sob iluminante D65.
+
+    Implementa a conversao padrao sRGB (expansao de gamma) -> XYZ (primarias
+    CIE D65) -> CIELAB, conforme formulas CIE 1976.
+
+    Esta funcao cobre a lacuna RGB->CIELAB identificada no roadmap da Fase 5.
+    Ela NAO e aplicada automaticamente pelo pipeline: L*, a*, b* medidos
+    continuam sendo a unica origem aceita para ``delta_e_cie76_vs_day0``.
+    Derivar L*, a*, b* de RGB exige decisao explicita apos validacao contra
+    instrumento, e qualquer uso deve registrar a origem como derivada.
+
+    Retorna (nan, nan, nan) para entradas ausentes ou fora de [0, 255].
+    """
+    try:
+        values = (float(r), float(g), float(b))
+    except (TypeError, ValueError):
+        return (np.nan, np.nan, np.nan)
+    if any(np.isnan(v) or v < 0 or v > 255 for v in values):
+        return (np.nan, np.nan, np.nan)
+
+    def _to_linear(channel: float) -> float:
+        c = channel / 255.0
+        if c <= 0.04045:
+            return c / 12.92
+        return ((c + 0.055) / 1.055) ** 2.4
+
+    red_l, green_l, blue_l = (_to_linear(v) for v in values)
+    # Primarias sRGB / iluminante CIE D65.
+    x = 0.4124564 * red_l + 0.3575761 * green_l + 0.1804375 * blue_l
+    y = 0.2126729 * red_l + 0.7151522 * green_l + 0.0721750 * blue_l
+    z = 0.0193339 * red_l + 0.1191920 * green_l + 0.9503041 * blue_l
+
+    # Branco de referencia D65 (CIE, normalizado para 1.0).
+    xn, yn, zn = 0.95047, 1.00000, 1.08883
+
+    def _f(t: float) -> float:
+        if t > 0.008856:
+            return t ** (1.0 / 3.0)
+        return 7.787 * t + 16.0 / 116.0
+
+    fx, fy, fz = _f(x / xn), _f(y / yn), _f(z / zn)
+    l_star = 116.0 * fy - 16.0
+    a_star = 500.0 * (fx - fy)
+    b_star = 200.0 * (fy - fz)
+    return (l_star, a_star, b_star)
 
 
 def plot_retention(stability: pd.DataFrame, out_dir: Path) -> None:
@@ -2156,75 +2274,462 @@ def plot_literature_retention(measurements_with_retention: pd.DataFrame, out_dir
     return path
 
 
-def analyze_literature(root: Path, include_pending: bool = False) -> None:
-    """Analyze literature data and generate HTML report."""
-    lit_dir = root / "data" / "literature"
-    out_dir = root / "data" / "literature" / "processed"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    studies, measurements, evidence = validate_literature_data(
-        root, include_pending=include_pending
-    )
+def load_harmonized_catalog(root: Path) -> pd.DataFrame:
+    """Carrega e valida a base harmonizada derivada (Fase 2) como fonte da analise.
 
-    measurements_with_retention = calculate_literature_retention(measurements)
-    kinetics = fit_literature_kinetics(measurements, include_pending=include_pending)
-    model_comparison = compare_literature_kinetic_models(
-        measurements, studies, include_pending=include_pending
+    Os CSVs brutos continuam sendo as fontes de dados: cada linha da base e
+    conferida, linha a linha, contra o CSV bruto correspondente
+    (source_record_id -> numero de linha). Qualquer divergencia interrompe a
+    analise com instrucao de regeneracao; nada e corrigido silenciosamente.
+    Nenhuma promocao de status acontece nesta camada: VERIFIED so e aceito com
+    localizacao primaria especifica e confirmada.
+    """
+    catalog_path = root / HARMONIZED_CATALOG_RELATIVE
+    if not catalog_path.exists():
+        raise FileNotFoundError(
+            f"Base harmonizada ausente: {catalog_path}. "
+            "Gere-a com: python tools/harmonize_literature.py --dir ."
+        )
+    catalog = pd.read_csv(catalog_path, dtype=str, keep_default_na=False)
+    missing = set(HARMONIZED_REQUIRED_COLUMNS) - set(catalog.columns)
+    if missing:
+        raise ValueError(
+            "Base harmonizada sem colunas obrigatorias: " + ", ".join(sorted(missing))
+            + ". Regenere com tools/harmonize_literature.py."
+        )
+    if catalog.empty:
+        raise ValueError("Base harmonizada vazia; regenere com tools/harmonize_literature.py.")
+
+    statuses = catalog["verification_status"].str.strip().str.upper()
+    if statuses.eq("").any():
+        raise ValueError("Toda observacao da base harmonizada precisa de verification_status explicito.")
+    invalid_statuses = sorted(set(statuses) - LITERATURE_VERIFICATION_STATUSES)
+    if invalid_statuses:
+        raise ValueError(f"verification_status fora do vocabulario do projeto: {invalid_statuses}.")
+    catalog["verification_status"] = statuses
+
+    classes = catalog["evidence_class"].str.strip()
+    if classes.eq("").any():
+        raise ValueError("Toda observacao da base harmonizada precisa de evidence_class.")
+    invalid_classes = sorted(set(classes) - LITERATURE_EVIDENCE_CLASSES)
+    if invalid_classes:
+        raise ValueError(f"evidence_class desconhecida na base harmonizada: {invalid_classes}.")
+    catalog["evidence_class"] = classes
+
+    if not catalog["observation_id"].is_unique:
+        raise ValueError("observation_id duplicado na base harmonizada.")
+    if not catalog["source_record_id"].is_unique:
+        raise ValueError("source_record_id duplicado na base harmonizada.")
+    execution_ids = {value for value in catalog["execution_id"].str.strip() if value}
+    if len(execution_ids) != 1:
+        raise ValueError(
+            "A base harmonizada deve conter exatamente um execution_id "
+            "(uma unica execucao deterministica)."
+        )
+
+    verified_rows = catalog.loc[catalog["verification_status"] == "VERIFIED"]
+    if not verified_rows.empty:
+        locations = verified_rows["source_locator"].str.strip()
+        folded = locations.str.casefold()
+        unpinned = locations.eq("") | folded.str.contains("pendente") | folded.str.contains("pending")
+        if unpinned.any():
+            raise ValueError(
+                "Promocao de status bloqueada: ha observacoes VERIFIED sem "
+                "localizacao primaria especifica e confirmada na base harmonizada."
+            )
+
+    _check_catalog_against_raw_sources(root / "data" / "literature", catalog)
+    return catalog
+
+
+def _check_catalog_against_raw_sources(lit_dir: Path, catalog: pd.DataFrame) -> None:
+    """Confere a base derivada contra os CSVs brutos (medições e evidencias).
+
+    Compara por source_record_id (STUDY|L{n} / STUDY|E{n} -> linha do CSV, com
+    cabecalho na linha 1). Falha = base desatualizada; a correcao e sempre a
+    regeneracao, nunca edicao da base por esta camada.
+    """
+
+    def same_text(left: object, right: object) -> bool:
+        return str(left).strip() == str(right).strip()
+
+    def same_number(left: object, right: object) -> bool:
+        try:
+            return float(left) == float(right)
+        except (TypeError, ValueError):
+            return same_text(left, right)
+
+    measurements_path = lit_dir / "literature_measurements.csv"
+    evidence_path = lit_dir / "literature_evidence.csv"
+    for path in (measurements_path, evidence_path):
+        if not path.exists():
+            raise FileNotFoundError(f"CSV bibliografico bruto ausente: {path}.")
+
+    by_source = dict(zip(catalog["source_record_id"], catalog.to_dict("records")))
+
+    raw_measurements = pd.read_csv(measurements_path, dtype=str, keep_default_na=False)
+    expected_measurement_ids = set()
+    for line_number, raw in enumerate(raw_measurements.to_dict("records"), start=2):
+        source_id = f"{raw['study_id']}|L{line_number}"
+        expected_measurement_ids.add(source_id)
+        row = by_source.get(source_id)
+        if row is None:
+            raise ValueError(
+                f"Base harmonizada nao contem a medicao {source_id}; "
+                "regenere com tools/harmonize_literature.py."
+            )
+        for field, raw_key, catalog_key in (
+            ("study_id", "study_id", "study_id"),
+            ("treatment_id", "treatment_id", "treatment_id"),
+            ("measurement", "measurement", "measurement"),
+            ("value_unit", "value_unit", "unit_original"),
+            ("time_unit", "time_unit", "time_unit_original"),
+            ("data_origin", "data_origin", "data_origin"),
+            ("reported_or_calculated", "reported_or_calculated", "reported_or_calculated"),
+        ):
+            if not same_text(raw[raw_key], row[catalog_key]):
+                raise ValueError(
+                    f"Divergencia entre CSV bruto e base harmonizada em {source_id} "
+                    f"({field}); regenere com tools/harmonize_literature.py."
+                )
+        for field, raw_key, catalog_key in (
+            ("value", "value", "value_original"),
+            ("time_value", "time_value", "time_value_original"),
+        ):
+            if not same_number(raw[raw_key], row[catalog_key]):
+                raise ValueError(
+                    f"Divergencia de {field} entre CSV bruto e base harmonizada em "
+                    f"{source_id}; regenere com tools/harmonize_literature.py."
+                )
+        if row["evidence_class"] != "QUANTITATIVE_MEASUREMENT":
+            raise ValueError(f"{source_id} deve ser QUANTITATIVE_MEASUREMENT na base harmonizada.")
+    catalog_measurement_ids = {sid for sid in catalog["source_record_id"] if "|L" in sid}
+    if catalog_measurement_ids != expected_measurement_ids:
+        raise ValueError(
+            "A base harmonizada nao corresponde 1:1 as medicoes de "
+            "literature_measurements.csv; regenere com tools/harmonize_literature.py."
+        )
+
+    raw_evidence = pd.read_csv(evidence_path, dtype=str, keep_default_na=False)
+    for line_number, raw in enumerate(raw_evidence.to_dict("records"), start=2):
+        if not any(str(value).strip() for value in raw.values()):
+            continue
+        source_id = f"{raw['study_id']}|E{line_number}"
+        row = by_source.get(source_id)
+        if row is None:
+            raise ValueError(
+                f"Base harmonizada nao contem a evidencia {source_id}; "
+                "regenere com tools/harmonize_literature.py."
+            )
+        for field in ("study_id", "evidence_type", "evidence_text"):
+            if not same_text(raw[field], row[field]):
+                raise ValueError(
+                    f"Divergencia entre CSV bruto e base harmonizada em {source_id} "
+                    f"({field}); regenere com tools/harmonize_literature.py."
+                )
+        for field in ("k_value", "half_life", "value"):
+            raw_number = str(raw[field]).strip()
+            catalog_key = "value_original" if field == "value" else field
+            catalog_number = str(row[catalog_key]).strip()
+            if raw_number and not same_number(raw_number, catalog_number):
+                raise ValueError(
+                    f"Divergencia de {field} entre CSV bruto e base harmonizada em "
+                    f"{source_id}; regenere com tools/harmonize_literature.py."
+                )
+            if not raw_number and catalog_number:
+                raise ValueError(
+                    f"Campo {field} presente na base mas ausente no bruto em {source_id}; "
+                    "regenere com tools/harmonize_literature.py."
+                )
+
+
+def split_literature_views(catalog: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Particiona o catalogo harmonizado nas visoes cientificas do projeto."""
+    if "verification_status" not in catalog.columns:
+        raise ValueError("O catalogo precisa da coluna verification_status para separar visoes.")
+    views: dict[str, pd.DataFrame] = {}
+    for view_name in LITERATURE_VIEWS:
+        allowed = VIEW_STATUS_SETS[view_name]
+        selected = catalog.loc[catalog["verification_status"].isin(allowed)].copy()
+        views[view_name] = selected.reset_index(drop=True)
+    return views
+
+
+def adapt_measurements_for_analysis(series_rows: pd.DataFrame) -> pd.DataFrame:
+    """Adapta linhas quantitativas do catalogo ao esquema exigido pelos modelos."""
+    if "evidence_class" in series_rows.columns:
+        foreign = sorted(set(series_rows["evidence_class"].astype(str)) - {"QUANTITATIVE_MEASUREMENT"})
+        if foreign:
+            raise ValueError(
+                "Somente QUANTITATIVE_MEASUREMENT entra nos ajustes; "
+                f"classes incompativeis recebidas: {foreign}."
+            )
+    mapping = {
+        "value_original": "value",
+        "unit_original": "value_unit",
+        "time_value_original": "time_value",
+        "time_unit_original": "time_unit",
+        "matrix_type": "matrix",
+        "source_locator": "source_location",
+    }
+    adapted = series_rows.copy()
+    for source_column, target_column in mapping.items():
+        if source_column in adapted.columns:
+            adapted[target_column] = adapted[source_column]
+    numeric_columns(adapted, [
+        "value", "time_value", "temperature_c", "pH",
+        "additive_concentration_pct", "standard_deviation", "replicate_count",
+    ])
+    missing = set(ANALYSIS_MEASUREMENT_COLUMNS) - set(adapted.columns)
+    if missing:
+        raise ValueError(f"Colunas ausentes para analise quantitativa: {sorted(missing)}.")
+    return adapted.reindex(columns=ANALYSIS_MEASUREMENT_COLUMNS)
+
+
+def _series_eligible_mask(fit_input: pd.DataFrame) -> pd.Series:
+    """Replica os criterios de elegibilidade dos ajustes por serie compativel."""
+    values = pd.to_numeric(fit_input["value"], errors="coerce")
+    times = pd.to_numeric(fit_input["time_value"], errors="coerce")
+    group_codes, _ = pd.factorize(
+        fit_input[SERIES_GROUP_KEYS].fillna("").astype(str).agg("|".join, axis=1), sort=False
     )
-    parameter_uncertainty = estimate_literature_kinetic_parameter_uncertainty(
-        model_comparison
-    )
-    concentration_uncertainty = estimate_literature_kinetic_concentration_intervals(
-        model_comparison
-    )
-    
-    series_plot = plot_literature_series(measurements, out_dir)
-    retention_plot = plot_literature_retention(measurements_with_retention, out_dir)
-    
-    measurements_with_retention.to_csv(out_dir / "literature_measurements_with_retention.csv", index=False)
-    kinetics.to_csv(out_dir / "literature_kinetics.csv", index=False)
-    model_comparison.to_csv(out_dir / "literature_kinetic_model_comparison.csv", index=False)
-    parameter_uncertainty.to_csv(
-        out_dir / "literature_kinetic_parameter_uncertainty.csv", index=False
-    )
-    concentration_uncertainty.to_csv(
-        out_dir / "literature_kinetic_concentration_uncertainty.csv", index=False
-    )
-    
+    frame = pd.DataFrame({"_value": values.to_numpy(), "_time": times.to_numpy(), "_code": group_codes})
+    eligible_codes: dict[int, bool] = {}
+    for code, group in frame.groupby("_code", sort=False):
+        eligible_codes[int(code)] = bool(
+            group["_value"].notna().all() and (group["_value"] > 0).all()
+            and group["_time"].notna().all() and group["_time"].nunique() >= 3
+        )
+    per_group_units: dict[int, bool] = {}
+    work = fit_input.assign(_code=group_codes)
+    for code, group in work.groupby("_code", sort=False):
+        per_group_units[int(code)] = bool(
+            group["time_unit"].nunique() == 1 and group["value_unit"].nunique() == 1
+        )
+    mask = [
+        eligible_codes[int(code)] and per_group_units[int(code)]
+        for code in group_codes
+    ]
+    return pd.Series(mask, index=fit_input.index)
+
+
+def build_inclusion_exclusion_summary(
+    catalog: pd.DataFrame,
+    view_name: str,
+    selected: pd.DataFrame,
+    fit_input: pd.DataFrame,
+) -> pd.DataFrame:
+    """Resume inclusao/exclusao por visao com motivos explicitos auditaveis."""
+    if view_name not in LITERATURE_VIEWS:
+        raise ValueError(f"Visao desconhecida: {view_name}.")
+    eligible_count = int(_series_eligible_mask(fit_input).sum()) if not fit_input.empty else 0
+    total_by_status = catalog["verification_status"].value_counts().to_dict()
+    total_by_class = catalog["evidence_class"].value_counts().to_dict()
+    selected_by_class = selected["evidence_class"].value_counts().to_dict() if not selected.empty else {}
+    quantitative_selected = int(selected_by_class.get("QUANTITATIVE_MEASUREMENT", 0))
+    rows = [
+        ("catalog", "TOTAL_CATALOG_OBSERVATIONS", len(catalog),
+         "Linhas da base harmonizada (derivada reproduzivel dos CSVs brutos)."),
+        ("catalog", "STATUS_VERIFIED", int(total_by_status.get("VERIFIED", 0)),
+         "Observacoes VERIFIED no catalogo."),
+        ("catalog", "STATUS_VERIFICATION_PENDING", int(total_by_status.get("VERIFICATION_PENDING", 0)),
+         "Observacoes VERIFICATION_PENDING no catalogo."),
+        ("catalog", "STATUS_REJECTED", int(total_by_status.get("REJECTED", 0)),
+         "Observacoes REJECTED no catalogo (preservadas, nunca ajustadas)."),
+        ("view", "INCLUDED_IN_VIEW", len(selected),
+         f"Observacoes com status em {sorted(VIEW_STATUS_SETS[view_name])} na visao '{view_name}'."),
+        ("view", "EXCLUDED_BY_STATUS", len(catalog) - len(selected),
+         "Observacoes fora do conjunto de status da visao."),
+        ("class", "EVIDENCE_CLASS_QUANTITATIVE", int(total_by_class.get("QUANTITATIVE_MEASUREMENT", 0)),
+         "Medicoes quantitativas no catalogo (inclui quantitativas transcritas de evidence)."),
+        ("class", "EVIDENCE_CLASS_PUBLISHED_KINETIC", int(total_by_class.get("PUBLISHED_KINETIC_PARAMETER", 0)),
+         "Parametros k/meia-vida publicados; nunca viram serie temporal."),
+        ("class", "EVIDENCE_CLASS_QUALITATIVE", int(total_by_class.get("QUALITATIVE_NARRATIVE", 0)),
+         "Narrativas qualitativas; nunca misturadas com medicoes numericas."),
+        ("fit", "EXCLUDED_NOT_QUANTITATIVE", len(selected) - quantitative_selected,
+         "Linhas da visao fora de QUANTITATIVE_MEASUREMENT (parametros/narrativas)."),
+        ("fit", "ELIGIBLE_FOR_FIT", eligible_count,
+         "Medicoes quantitativas em series compativeis (>=3 tempos, unidade unica)."),
+        ("fit", "EXCLUDED_NO_TIME_SERIES", quantitative_selected - eligible_count,
+         "Quantitativas sem serie ajustavel (tempo ausente, <3 tempos ou unidade mista)."),
+    ]
+    if view_name == "rejected":
+        rows.append(("policy", "EXCLUDED_REJECTED_POLICY", len(selected),
+                     "Visao rejected: registros preservados com motivo; excluidos de ajuste por padrao."))
+    blocked_details: list[str] = []
+    if not fit_input.empty:
+        pooled_units = sorted({str(value) for value in fit_input["value_unit"].dropna().astype(str)})
+        pooled_times = sorted({str(value) for value in fit_input["time_unit"].dropna().astype(str)})
+        pooled_matrices = sorted({str(value) for value in fit_input["matrix"].dropna().astype(str)})
+        blocked_details.append(
+            "Curva unica entre estudos bloqueada: unidades "
+            f"{pooled_units}, escalas {pooled_times}, matrizes {pooled_matrices}; "
+            "ajustes somente dentro de grupos compativeis."
+        )
+    rows.append(("comparability", "CROSS_STUDY_POOLING_BLOCKED", len(blocked_details),
+                 "; ".join(blocked_details) if blocked_details else "Sem insumo quantitativo nesta visao."))
+    return pd.DataFrame(rows, columns=["stage", "reason", "count", "detail"])
+
+
+def analyze_literature(
+    root: Path,
+    include_pending: bool = False,
+    view: str | None = None,
+) -> None:
+    """Analisa a literatura a partir da base harmonizada, por visao cientifica."""
+    resolved_view = view or ("combined" if include_pending else "verified")
+    if resolved_view not in LITERATURE_VIEWS:
+        raise ValueError(f"Visao desconhecida: {resolved_view}. Use uma de {list(LITERATURE_VIEWS)}.")
+    if include_pending and resolved_view in ("verified", "rejected"):
+        raise ValueError("include_pending=True exige a visao 'combined' (ou 'pending').")
+    exploratory = resolved_view in ("pending", "combined")
+
+    lit_dir = root / "data" / "literature"
+    out_root = lit_dir / "processed"
+    view_dir = out_root / "views" / VIEW_DIR_NAMES[resolved_view]
+    view_dir.mkdir(parents=True, exist_ok=True)
+
+    catalog = load_harmonized_catalog(root)
+    views = split_literature_views(catalog)
+    selected = views[resolved_view]
+
+    studies_path = lit_dir / "literature_studies.csv"
+    if not studies_path.exists():
+        raise FileNotFoundError(f"Arquivo de literatura nao encontrado: {studies_path}. Execute init primeiro.")
+    studies = pd.read_csv(studies_path)
+    missing_study_columns = set(LITERATURE_STUDY_COLUMNS) - set(studies.columns)
+    if missing_study_columns:
+        raise ValueError(
+            "Colunas obrigatorias ausentes em literature_studies.csv: " + ", ".join(sorted(missing_study_columns))
+        )
+    if studies.empty:
+        raise ValueError("literature_studies.csv esta vazio.")
+
+    pending_total = int(catalog["verification_status"].eq("VERIFICATION_PENDING").sum())
+    if resolved_view == "verified":
+        warnings.warn(
+            f"{pending_total} registros VERIFICATION_PENDING foram excluidos da analise aprovada.",
+            UserWarning,
+            stacklevel=2,
+        )
+    elif exploratory:
+        warnings.warn(
+            f"Analise exploratoria '{resolved_view}' inclui {len(selected)} registros "
+            "VERIFICATION_PENDING; eles nao sao benchmarks aprovados.",
+            UserWarning,
+            stacklevel=2,
+        )
+    else:
+        warnings.warn(
+            "Visao 'rejected': registros preservados com motivo e excluidos de ajuste por padrao.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    quantitative = selected.loc[selected["evidence_class"] == "QUANTITATIVE_MEASUREMENT"].copy()
+    published_params = selected.loc[selected["evidence_class"] == "PUBLISHED_KINETIC_PARAMETER"].copy()
+    narratives = selected.loc[selected["evidence_class"] == "QUALITATIVE_NARRATIVE"].copy()
+    series_source = quantitative.loc[quantitative["source_record_id"].str.contains("|L", regex=False)].copy()
+    if resolved_view == "rejected":
+        series_source = series_source.iloc[0:0].copy()
+    fit_input = adapt_measurements_for_analysis(series_source)
+    fit_input["analysis_view"] = resolved_view
+
+    measurements_with_retention = calculate_literature_retention(fit_input)
+    kinetics = fit_literature_kinetics(fit_input, include_pending=exploratory)
+    if kinetics.empty:
+        kinetics = kinetics.reindex(columns=LITERATURE_FIT_COLUMNS)
+    else:
+        kinetics["analysis_view"] = resolved_view
+    model_comparison = compare_literature_kinetic_models(fit_input, studies, include_pending=exploratory)
+    if not model_comparison.empty:
+        model_comparison["analysis_view"] = resolved_view
+    parameter_uncertainty = estimate_literature_kinetic_parameter_uncertainty(model_comparison)
+    concentration_uncertainty = estimate_literature_kinetic_concentration_intervals(model_comparison)
+
+    summary = build_inclusion_exclusion_summary(catalog, resolved_view, selected, fit_input)
+    series_plot = plot_literature_series(fit_input, view_dir)
+    retention_plot = plot_literature_retention(measurements_with_retention, view_dir)
+
+    selected.to_csv(view_dir / "catalog_view.csv", index=False)
+    quantitative.to_csv(view_dir / "quantitative_measurements.csv", index=False)
+    published_params.to_csv(view_dir / "published_kinetic_parameters.csv", index=False)
+    narratives.to_csv(view_dir / "qualitative_narrative_evidence.csv", index=False)
+    measurements_with_retention.to_csv(view_dir / "literature_measurements_with_retention.csv", index=False)
+    kinetics.to_csv(view_dir / "literature_kinetics.csv", index=False)
+    model_comparison.to_csv(view_dir / "literature_kinetic_model_comparison.csv", index=False)
+    parameter_uncertainty.to_csv(view_dir / "literature_kinetic_parameter_uncertainty.csv", index=False)
+    concentration_uncertainty.to_csv(view_dir / "literature_kinetic_concentration_uncertainty.csv", index=False)
+    summary.to_csv(view_dir / "inclusion_exclusion_summary.csv", index=False)
+
+    legacy_targets = {
+        "literature_measurements_with_retention.csv": measurements_with_retention,
+        "literature_kinetics.csv": kinetics,
+        "literature_kinetic_model_comparison.csv": model_comparison,
+        "literature_kinetic_parameter_uncertainty.csv": parameter_uncertainty,
+        "literature_kinetic_concentration_uncertainty.csv": concentration_uncertainty,
+        "inclusion_exclusion_summary.csv": summary,
+    }
+    for name, frame in legacy_targets.items():
+        frame.to_csv(out_root / name, index=False)
+    for png_name, source in (("literature_time_series.png", series_plot), ("literature_retention.png", retention_plot)):
+        legacy_png = out_root / png_name
+        if source is not None and Path(source).exists():
+            shutil.copyfile(source, legacy_png)
+        elif legacy_png.exists():
+            legacy_png.unlink()
+
     images = []
     if series_plot:
-        images.append(("Séries temporais da literatura", series_plot))
+        images.append(("Series temporais da literatura", series_plot))
     if retention_plot:
-        images.append(("Retenção calculada", retention_plot))
-    
-    title = "Análise de literatura — estabilidade de antocianinas"
-    notice = ("Esta análise resume apenas dados publicados. Cada série é separada por tratamento, matriz, "
-              "variável e unidade; não misture resultados com data/raw nem use literatura automaticamente no ML. "
-              "Retenção e ajustes cinéticos são cálculos identificados nas saídas. "
-              "A comparação de ordem zero, primeira e segunda ordem ajusta os modelos na escala original, "
-              "registra resíduos e métricas no intervalo observado e não extrapola. AICc é descritivo sob "
-              "hipótese iid, não seleciona modelos com segurança para observações longitudinais; com três "
-              "tempos não é calculável, e a incerteza não é estimada sem replicação independente. "
-              + ("Registros VERIFICATION_PENDING foram incluídos para exploração; não são benchmarks aprovados."
-                 if include_pending else
-                 "Apenas registros VERIFIED entram na análise; pendentes e rejeitados são excluídos."))
-    
+        images.append(("Retencao calculada", retention_plot))
+
+    eligible = int(summary.loc[summary["reason"] == "ELIGIBLE_FOR_FIT", "count"].iloc[0])
+    scope_phrase = {
+        "verified": "Visao VERIFICADA (analysis_view='verified'): apenas registros VERIFIED; sem fallback para pendentes.",
+        "pending": "Visao PENDENTE EXPLORATORIA (analysis_view='pending'): VERIFICATION_PENDING ainda nao confirmados.",
+        "rejected": "Visao REJEITADA (analysis_view='rejected'): registros preservados com motivo; excluidos de ajuste.",
+        "combined": "Visao COMBINADA EXPLORATORIA (analysis_view='combined'): VERIFIED + PENDING; REJECTED excluido.",
+    }[resolved_view]
+    count_phrase = (
+        f"Catalogo: {len(catalog)} observacoes; incluidas nesta visao: {len(selected)}; "
+        f"quantitativas na visao: {len(quantitative)}; elegiveis para ajuste: {eligible}; "
+        f"parametros publicados: {len(published_params)}; narrativas: {len(narratives)}."
+    )
+    empty_phrase = ""
+    if fit_input.empty or eligible == 0:
+        empty_phrase = " Nenhuma serie elegivel nesta visao; saidas vazias validas."
+    notice = (
+        "Esta analise resume apenas dados publicados e le a BASE HARMONIZADA DERIVADA "
+        "(os CSVs brutos continuam sendo as fontes; a base e conferida linha a linha). "
+        "Cada serie e separada por tratamento, matriz, variavel e unidade; "
+        "nao misture resultados com data/raw nem use literatura automaticamente no ML. "
+        "Retencao e ajustes cineticos sao calculos identificados nas saidas. "
+        + scope_phrase + " " + count_phrase + empty_phrase
+    )
+    title = f"Analise de literatura [{resolved_view}] - estabilidade de antocianinas"
     generate_html_report(
         title,
         notice,
         [("Estudos registrados", studies),
-         ("Medições quantitativas", measurements_with_retention),
-         ("Resumos cinéticos e evidências qualitativas", evidence),
-         ("Ajustes cinéticos exploratórios", kinetics)],
+         ("Resumo de inclusao/exclusao", summary),
+         ("Medicoes quantitativas (visao)", measurements_with_retention),
+         ("Parametros cineticos publicados (nao ajustados)", published_params),
+         ("Evidencias qualitativas/narrativas", narratives),
+         ("Ajustes cineticos", kinetics)],
         images,
-        out_dir / "literature_report.html"
+        view_dir / "literature_report.html",
     )
-    
-    print(f"Análise de literatura concluída. Resultados em: {out_dir.resolve()}")
-    print(f"Relatório HTML: {(out_dir / 'literature_report.html').resolve()}")
-    print("AVISO: dados de literatura são de artigos publicados; não substituem medições próprias.")
-    if include_pending:
-        print("AVISO EXPLÍCITO: análise exploratória inclui registros VERIFICATION_PENDING; não use como benchmark aprovado.")
+    shutil.copyfile(view_dir / "literature_report.html", out_root / "literature_report.html")
+
+    print(f"Analise de literatura [{resolved_view}] concluida. Resultados em: {view_dir.resolve()}")
+    print(f"Relatorio HTML: {(view_dir / 'literature_report.html').resolve()}")
+    print("AVISO: dados de literatura sao de artigos publicados; nao substituem medicoes proprias.")
+    if exploratory:
+        print("AVISO EXPLICITO: analise exploratoria inclui registros VERIFICATION_PENDING.")
+    if resolved_view == "verified" and (fit_input.empty or eligible == 0):
+        print(f"AVISO: {pending_total} registros VERIFICATION_PENDING excluidos da analise aprovada.")
 
 
 def generate_experimental_plan(root: Path, concentrations: list[float] | None = None) -> None:
@@ -2311,6 +2816,10 @@ def main() -> int:
         "--include-pending", action="store_true",
         help="Incluir linhas VERIFICATION_PENDING somente para exploração, com aviso explícito",
     )
+    literature_parser.add_argument(
+        "--view", choices=list(LITERATURE_VIEWS), default=None,
+        help="Visão científica da base harmonizada (padrão: verified; --include-pending equivale a combined)",
+    )
     plan_parser = subparsers.add_parser("plan", help="Gerar plano experimental para hipótese de estabilização")
     plan_parser.add_argument("--dir", type=Path, default=Path.cwd(), help="Pasta do projeto (padrão: pasta atual)")
     plan_parser.add_argument("--concentrations", type=float, nargs="+", default=[0.1, 0.2, 0.4, 0.6],
@@ -2326,7 +2835,7 @@ def main() -> int:
         elif args.command == "ml":
             train_ml_model(args.dir, target=args.target, include_literature=args.include_literature)
         elif args.command == "literature":
-            analyze_literature(args.dir, include_pending=args.include_pending)
+            analyze_literature(args.dir, include_pending=args.include_pending, view=args.view)
         elif args.command == "plan":
             generate_experimental_plan(args.dir, concentrations=args.concentrations)
     except (ValueError, FileNotFoundError, pd.errors.ParserError) as exc:

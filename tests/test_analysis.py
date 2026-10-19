@@ -79,6 +79,30 @@ class TestAnalysis(unittest.TestCase):
         self.assertAlmostEqual(out.loc[0, "delta_e_cie76_vs_day0"], 0.0, places=5)
         self.assertGreater(out.loc[1, "delta_e_cie76_vs_day0"], 0.0)
 
+    def test_srgb_to_cielab_reference_values(self):
+        # Branco sRGB: L* = 100, a* ~ 0, b* ~ 0 sob D65.
+        l_white, a_white, b_white = lab.srgb_to_cielab(255, 255, 255)
+        self.assertAlmostEqual(l_white, 100.0, places=3)
+        self.assertAlmostEqual(a_white, 0.0, delta=0.05)
+        self.assertAlmostEqual(b_white, 0.0, delta=0.05)
+
+        # Preto sRGB: origem do espaco CIELAB.
+        l_black, a_black, b_black = lab.srgb_to_cielab(0, 0, 0)
+        self.assertAlmostEqual(l_black, 0.0, places=6)
+        self.assertAlmostEqual(a_black, 0.0, places=6)
+        self.assertAlmostEqual(b_black, 0.0, places=6)
+
+        # Vermelho sRGB puro sob D65: valores de referencia CIE (aprox.).
+        l_red, a_red, b_red = lab.srgb_to_cielab(255, 0, 0)
+        self.assertAlmostEqual(l_red, 53.2408, delta=0.05)
+        self.assertAlmostEqual(a_red, 80.0925, delta=0.1)
+        self.assertAlmostEqual(b_red, 67.2032, delta=0.1)
+
+        # Entradas fora de faixa retornam nulo em vez de estimar.
+        for invalid in [(256, 0, 0), (-1, 0, 0), (None, 0, 0)]:
+            l_val, a_val, b_val = lab.srgb_to_cielab(*invalid)
+            self.assertTrue(math.isnan(l_val) and math.isnan(a_val) and math.isnan(b_val))
+
     def test_simulation_is_separate_and_temperature_changes_rate(self):
         cfg = {
             "reference_temperature_c": 25.0,
@@ -364,9 +388,17 @@ class TestAnalysis(unittest.TestCase):
         with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
             studies, measurements, evidence = lab.validate_literature_data(root, include_pending=True)
 
-        self.assertEqual(len(studies), 5)
+        self.assertEqual(len(studies), 6)
         self.assertEqual(len(measurements), 39)
-        self.assertEqual(set(studies["study_id"]), {"STUDY_A", "STUDY_B", "STUDY_C", "STUDY_D", "STUDY_E"})
+        self.assertEqual(
+            set(studies["study_id"]),
+            {"STUDY_A", "STUDY_B", "STUDY_C", "STUDY_D", "STUDY_E", "STUDY_F"},
+        )
+        # STUDY_F (Muhamad et al. 2023) e registro bibliografico separado,
+        # relacionado a STUDY_B como possivel sobreposicao; nao leva observacoes.
+        study_f = studies.loc[studies["study_id"] == "STUDY_F"]
+        self.assertEqual(len(study_f), 1)
+        self.assertEqual(study_f.iloc[0]["doi"], "10.26656/fr.2017.6(S2).030")
         self.assertTrue(measurements["source_url"].str.startswith("https://").all())
         self.assertTrue(measurements["source_location"].str.strip().ne("").all())
         self.assertTrue(measurements["data_origin"].eq("PUBLISHED_ARTICLE").all())
