@@ -1,7 +1,7 @@
 # Relatorio de Auditoria - Fase 2, Etapa 1: Harmonia de Dados
 
 **Data:** 17 de outubro de 2026
-**Execucao:** F2E1-fb880f2bcdbe583a
+**Execucao:** F2E1-916115812f26a6fc
 **Status:** iniciada - derivada gerada; originais inalterados.
 
 ## 1. Resumo executivo

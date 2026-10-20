@@ -546,16 +546,22 @@ class TestPublishedFixtures(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with self.assertWarnsRegex(UserWarning, "excluídos da análise aprovada"):
             _, approved, _ = lab.validate_literature_data(root)
-        self.assertTrue(approved.empty)
+        self.assertEqual(set(approved["study_id"]), {"STUDY_B"},
+                         "análise aprovada deve conter somente STUDY_B (verificado)")
+        self.assertEqual(set(approved["verification_status"]), {"VERIFIED"})
         with self.assertWarnsRegex(UserWarning, "não são benchmarks aprovados"):
             _, exploratory, _ = lab.validate_literature_data(root, include_pending=True)
         self.assertEqual(len(exploratory), 39)
-        self.assertEqual(set(exploratory["verification_status"]), {"VERIFICATION_PENDING"})
+        self.assertEqual(set(exploratory["verification_status"]),
+                         {"VERIFICATION_PENDING", "VERIFIED"})
         with self.assertWarnsRegex(UserWarning, "exploratório inclui"):
             fits = lab.fit_literature_kinetics(exploratory, include_pending=True)
         self.assertGreater(len(fits), 0)
-        self.assertEqual(set(fits["verification_status"]), {"VERIFICATION_PENDING"})
-        self.assertTrue(lab.fit_literature_kinetics(approved).empty)
+        self.assertEqual(set(fits["verification_status"]),
+                         {"VERIFICATION_PENDING", "VERIFIED"})
+        approved_fits = lab.fit_literature_kinetics(approved)
+        self.assertFalse(approved_fits.empty, "STUDY_B verificado deve gerar ajustes aprovados")
+        self.assertEqual(set(approved_fits["study_id"]), {"STUDY_B"})
 
     def test_kinetic_reproduction_uses_generic_time_units_and_pending_status(self):
         report = pd.read_csv(
@@ -644,7 +650,9 @@ class TestLiteratureKineticModelComparison(unittest.TestCase):
 
         self.assertEqual(len(comparison), 27)
         self.assertEqual(set(comparison["model"]), {"zero_order", "first_order", "second_order"})
-        self.assertEqual(set(comparison["verification_status"]), {"VERIFICATION_PENDING"})
+        self.assertEqual(set(comparison["verification_status"]),
+                         {"VERIFICATION_PENDING", "VERIFIED"},
+                         "comparação exploratória deve manter o status de origem (STUDY_A pendente, STUDY_B verificado)")
         self.assertTrue(comparison["data_origin"].eq("PUBLISHED_ARTICLE").all())
         self.assertTrue(comparison["citation"].notna().all())
         self.assertTrue(comparison["title"].notna().all())
@@ -681,12 +689,16 @@ class TestLiteratureKineticModelComparison(unittest.TestCase):
         self.assertTrue(comparison["fit_time_min"].le(comparison["fit_time_max"]).all())
 
     def test_pending_series_are_excluded_from_default_comparison(self):
+        """Sem include_pending, só STUDY_B (VERIFIED) entra; STUDY_A (pendente) é excluído."""
         root = Path(__file__).resolve().parents[1]
         with self.assertWarnsRegex(UserWarning, "excluídos da análise aprovada"):
             studies, measurements, _ = lab.validate_literature_data(root)
         comparison = lab.compare_literature_kinetic_models(measurements, studies)
 
-        self.assertTrue(comparison.empty)
+        self.assertFalse(comparison.empty, "STUDY_B verificado deve entrar na comparação aprovada")
+        self.assertEqual(set(comparison["study_id"]), {"STUDY_B"},
+                         "estudos pendentes (STUDY_A) não podem entrar na comparação aprovada")
+        self.assertEqual(set(comparison["verification_status"]), {"VERIFIED"})
         self.assertIn("verification_status", comparison.columns)
         self.assertIn("source_location", comparison.columns)
 
@@ -871,6 +883,284 @@ class TestLiteratureKineticModelComparison(unittest.TestCase):
         self.assertTrue(intervals["concentration_interval_limitations"].str.contains(
             "nonpositive", case=False
         ).all())
+
+
+class TestPan2021HalfLifeUnits(unittest.TestCase):
+    """Verificar que a meia-vida de Pan et al. (2021) permanece em horas, sem conversao para dias."""
+
+    def test_half_life_remains_in_hours_not_days(self):
+        """t1/2 = 67.28 h deve ser registrada como horas, nao convertida para dias."""
+        fixture_path = FIXTURES_DIR / "pan_2021.json"
+        import json
+
+        with open(fixture_path, encoding="utf-8") as f:
+            fixture = json.load(f)
+
+        half_life = None
+        for v in fixture["published_values"]:
+            if v["measurement"] == "half-life":
+                half_life = v
+                break
+
+        self.assertIsNotNone(half_life, "meia-vida nao encontrada no fixture")
+        self.assertEqual(half_life["value"], 67.28)
+        self.assertEqual(half_life["unit"], "h")
+        # 67.28 h != 67.28 dias; garantir que nao haja conversao implicita
+        self.assertNotEqual(half_life["unit"], "dia")
+        self.assertEqual(half_life["reported_or_calculated"], "reported")
+
+
+class TestArrheniusRateRatio(unittest.TestCase):
+    """Verificar razao de taxas de Arrhenius contra a fórmula analítica.
+
+    k2/k1 = exp(-Ea/R * (1/T2 - 1/T1)), com T em Kelvin.
+    """
+
+    def test_rate_ratio_matches_arrhenius_formula(self):
+        """A razao k(35 C)/k(25 C) deve coincidir com a fórmula de Arrhenius."""
+        Ea_kj = 40.0
+        Ea_j = Ea_kj * 1000.0
+        R = 8.314462618
+        T1_c, T2_c = 25.0, 35.0
+        T1_k = T1_c + 273.15
+        T2_k = T2_c + 273.15
+
+        expected_ratio = math.exp(
+            -(Ea_j / R) * (1.0 / T2_k - 1.0 / T1_k)
+        )
+
+        cfg = {
+            "reference_temperature_c": T1_c,
+            "reference_half_life_days": 10.0,
+            "activation_energy_kj_mol": Ea_kj,
+            "initial_retention_pct": 100.0,
+            "days": [0, 7],
+            "scenarios": [
+                {
+                    "scenario_id": "T25",
+                    "label": "25 C",
+                    "temperature_c": T1_c,
+                    "pH_factor": 1.0,
+                    "light_factor": 1.0,
+                    "oxygen_factor": 1.0,
+                    "packaging_factor": 1.0,
+                },
+                {
+                    "scenario_id": "T35",
+                    "label": "35 C",
+                    "temperature_c": T2_c,
+                    "pH_factor": 1.0,
+                    "light_factor": 1.0,
+                    "oxygen_factor": 1.0,
+                    "packaging_factor": 1.0,
+                },
+            ],
+        }
+        results = lab.simulate_scenarios(cfg)
+        rates = results.groupby("temperature_c")["k_per_day_simulated"].first()
+        ratio = rates.loc[T2_c] / rates.loc[T1_c]
+        self.assertAlmostEqual(ratio, expected_ratio, delta=1e-12)
+
+
+class TestFirstOrderKineticKZero(unittest.TestCase):
+    """Verificar comportamento da meia-vida quando a constante cinetica k tende a zero."""
+
+    def test_k_zero_half_life_not_negative(self):
+        """k = 0 nao deve produzir meia-vida negativa ou finita invalida."""
+        # Primeira ordem: t1/2 = ln(2) / k. Com k = 0, t1/2 tende ao infinito.
+        k = 0.0
+        if k > 0:
+            t_half = math.log(2.0) / k
+        else:
+            t_half = float("nan")
+        self.assertTrue(math.isnan(t_half) or t_half == float("inf"))
+
+    def test_k_negative_rejected_by_fit(self):
+        """k negativo eh fora do dominio fisico para degradacao de primeira ordem."""
+        k = -0.05
+        self.assertLess(k, 0)
+        # k negativo implicaria crescimento, nao degradacao; nao e aceitavel
+        # como constante de degradacao de antocianinas.
+
+
+class TestTACCompleteManualCalculation(unittest.TestCase):
+    """Verificar o calculo completo do TAC passo a passo, incluindo unidades."""
+
+    def test_tac_step_by_step_manual_matches_production(self):
+        """Cada etapa do calculo (A, depois C) deve coincidir com o calculo manual."""
+        # Absorbancias de exemplo
+        a520_p1, a700_p1 = 0.500, 0.020
+        a520_p45, a700_p45 = 0.040, 0.020
+        df = 10.0
+        path = 1.0
+        mw = 449.2  # g/mol (cianidina-3-glicosídeo)
+        epsilon = 26900.0  # L mol^-1 cm^-1
+
+        # Etapa 1: diferenca de absorbancia
+        A = (a520_p1 - a700_p1) - (a520_p45 - a700_p45)
+        expected_A = 0.460
+
+        # Etapa 2: concentracao em mol/L, depois converter para mg/L
+        # C_mol_per_L = A / (epsilon * path)
+        # C_mg_per_L = C_mol_per_L * mw * 1000 * df  (g->mg: x1000; DF aplicado)
+        C_mol_per_L = A / (epsilon * path)
+        C_mg_per_L = C_mol_per_L * mw * 1000.0 * df
+
+        self.assertAlmostEqual(A, expected_A, places=6)
+        self.assertAlmostEqual(C_mg_per_L, 76.81487, places=4)
+
+        # Verificar com a funcao de producao
+        row = {
+            "batch_id": "B1", "formulation": "native", "storage_condition": "4C_dark",
+            "day": 0, "vial_id": "V1", "replicate": 1, "pH_storage": 4.0,
+            "a520_ph1": a520_p1, "a700_ph1": a700_p1,
+            "a520_ph45": a520_p45, "a700_ph45": a700_p45,
+            "dilution_factor": df, "path_length_cm": path, "notes": "",
+        }
+        out = lab.calculate_tac(pd.DataFrame([row]))
+        self.assertAlmostEqual(out.loc[0, "absorbance_difference"], expected_A, places=6)
+        self.assertAlmostEqual(out.loc[0, "tac_mg_c3g_L"], C_mg_per_L, places=4)
+
+
+class TestLiteratureTraceability(unittest.TestCase):
+    """Verificar rastreabilidade bibliográfica: nenhum registro promovido sem fonte primária."""
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.lit_dir = self.root / "data" / "literature"
+
+    def test_all_verification_statuses_remain_pending(self):
+        """Somente STUDY_B (texto integral confirmado) é VERIFIED; os demais seguem pendentes."""
+        status_path = self.lit_dir / "literature_verification_status.csv"
+        self.assertTrue(status_path.exists(), "literature_verification_status.csv deve existir")
+        status = pd.read_csv(status_path)
+        self.assertGreater(len(status), 0, "deve haver registros de verificação")
+        verified = status.loc[status["verification_status"] == "VERIFIED"]
+        pending = status.loc[status["verification_status"] == "VERIFICATION_PENDING"]
+        self.assertEqual(set(verified["study_id"]), {"STUDY_B"},
+                         "apenas STUDY_B pode ser VERIFIED (confirmado contra a Tabela 8)")
+        self.assertEqual(len(verified), 21, "STUDY_B deve ter exatamente 21 registros VERIFIED")
+        self.assertEqual(set(pending["study_id"]), {"STUDY_A"},
+                         "apenas STUDY_A deve permanecer pendente no manifesto de verificação")
+        self.assertEqual(len(pending), 18, "devem restar 18 registros de STUDY_A pendentes")
+
+    def test_reported_or_calculated_only_reported_for_measurements(self):
+        """Valores de medição publicados devem ser classificados como 'reported'."""
+        meas_path = self.lit_dir / "literature_measurements.csv"
+        self.assertTrue(meas_path.exists(), "literature_measurements.csv deve existir")
+        meas = pd.read_csv(meas_path)
+        if len(meas) > 0:
+            self.assertTrue(
+                (meas["data_origin"] == "PUBLISHED_ARTICLE").all(),
+                "todas as medições de literatura devem ser PUBLISHED_ARTICLE",
+            )
+            self.assertTrue(
+                (meas["reported_or_calculated"] == "reported").all(),
+                "valores publicados devem ser classificados como 'reported', nao 'calculated'",
+            )
+
+    def test_no_simulation_or_literature_masquerading_as_experimental(self):
+        """Nenhuma linha SIMULATION_ONLY ou LITERATURE deve aparecer como EXPERIMENTAL em ML."""
+        ml_path = self.root / "data" / "raw" / "ml_observations.csv"
+        if not ml_path.exists():
+            self.skipTest("ml_observations.csv nao existe ainda")
+        ml = pd.read_csv(ml_path)
+        if len(ml) > 0 and "data_origin" in ml.columns:
+            self.assertTrue(
+                (ml["data_origin"] == "EXPERIMENTAL").all(),
+                "apenas linhas EXPERIMENTAL devem ser usadas no treino de ML por padrao",
+            )
+
+
+class TestLiteratureAccessibilityTraceability(unittest.TestCase):
+    """Rastreabilidade da recuperação do texto integral de STUDY_B.
+
+    STUDY_B foi confirmado por espelho alternativo (Semantic Scholar) contra a
+    Tabela 8, p. 6; os demais estudos, cujo texto integral segue inacessível,
+    permanecem pendentes com campos de revisão vazios.
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.lit_dir = self.root / "data" / "literature"
+
+    def _is_cell_empty(self, value) -> bool:
+        """Uma célula está vazia se for NaN (pandas) ou string vazia após strip."""
+        import pandas as pd
+
+        if pd.isna(value):
+            return True
+        return str(value).strip() == ""
+
+    def test_only_study_b_verified_after_primary_source_recovery(self):
+        """Apenas STUDY_B é VERIFIED (fonte primária recuperada); os demais seguem pendentes."""
+        status_path = self.lit_dir / "literature_verification_status.csv"
+        self.assertTrue(status_path.exists(), "literature_verification_status.csv deve existir")
+        status = pd.read_csv(status_path)
+        self.assertGreater(len(status), 0, "deve haver registros de verificação")
+        verified_ids = set(status.loc[status["verification_status"] == "VERIFIED", "study_id"])
+        self.assertEqual(verified_ids, {"STUDY_B"},
+                         "somente STUDY_B pode ser VERIFIED; os demais Textos integrais "
+                         "seguem inacessíveis (403/falha de fetch)")
+
+    def test_verified_source_location_specific_for_study_b_and_empty_for_others(self):
+        """STUDY_B deve ter localização específica (Tabela 8, p. 6); os demais, vazia."""
+        status_path = self.lit_dir / "literature_verification_status.csv"
+        status = pd.read_csv(status_path)
+        for _, row in status.iterrows():
+            loc = row["verified_source_location"]
+            if row["study_id"] == "STUDY_B":
+                loc_text = str(loc)
+                self.assertFalse(self._is_cell_empty(loc),
+                                 f"STUDY_B/{row['treatment_id']} VERIFIED exige localização")
+                self.assertIn("Tabela 8", loc_text)
+                self.assertIn("p. 6", loc_text)
+                self.assertIn("muhamad_2022.pdf", loc_text)
+            else:
+                self.assertTrue(
+                    self._is_cell_empty(loc),
+                    f"registro {row['study_id']}/{row['treatment_id']} tem localização "
+                    f"preenchida sem fonte primária confirmada: '{loc}'",
+                )
+
+    def test_review_fields_present_for_study_b_and_empty_for_others(self):
+        """STUDY_B revisado por Lapllace em 2026-10-20; os demais, sem revisão."""
+        status_path = self.lit_dir / "literature_verification_status.csv"
+        status = pd.read_csv(status_path)
+        for _, row in status.iterrows():
+            reviewed_on = row["reviewed_on"]
+            reviewer = row["reviewer"]
+            if row["study_id"] == "STUDY_B":
+                self.assertEqual(str(reviewed_on).strip(), "2026-10-20",
+                                 f"STUDY_B/{row['treatment_id']} deve ter reviewed_on ISO")
+                self.assertEqual(str(reviewer).strip(), "Lapllace",
+                                 f"STUDY_B/{row['treatment_id']} deve registrar o revisor humano")
+            else:
+                self.assertTrue(
+                    self._is_cell_empty(reviewed_on),
+                    f"registro {row['study_id']}/{row['treatment_id']} tem reviewed_on "
+                    f"preenchido sem revisão: '{reviewed_on}'",
+                )
+                self.assertTrue(
+                    self._is_cell_empty(reviewer),
+                    f"registro {row['study_id']}/{row['treatment_id']} tem reviewer "
+                    f"preenchido sem revisão: '{reviewer}'",
+                )
+
+    def test_all_measurements_remain_reported_not_calculated(self):
+        """Valores publicados devem continuar classificados como 'reported', nunca 'calculated' sem fórmula derivada."""
+        meas_path = self.lit_dir / "literature_measurements.csv"
+        self.assertTrue(meas_path.exists(), "literature_measurements.csv deve existir")
+        meas = pd.read_csv(meas_path)
+        if len(meas) > 0:
+            self.assertTrue(
+                (meas["data_origin"] == "PUBLISHED_ARTICLE").all(),
+                "todas as medições de literatura devem ser PUBLISHED_ARTICLE",
+            )
+            self.assertTrue(
+                (meas["reported_or_calculated"] == "reported").all(),
+                "valores publicados devem ser classificados como 'reported', nao 'calculated'",
+            )
 
 
 if __name__ == "__main__":

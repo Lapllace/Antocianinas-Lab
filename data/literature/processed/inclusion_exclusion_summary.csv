@@ -1,14 +1,14 @@
 stage,reason,count,detail
 catalog,TOTAL_CATALOG_OBSERVATIONS,54,Linhas da base harmonizada (derivada reproduzivel dos CSVs brutos).
-catalog,STATUS_VERIFIED,0,Observacoes VERIFIED no catalogo.
-catalog,STATUS_VERIFICATION_PENDING,54,Observacoes VERIFICATION_PENDING no catalogo.
+catalog,STATUS_VERIFIED,21,Observacoes VERIFIED no catalogo.
+catalog,STATUS_VERIFICATION_PENDING,33,Observacoes VERIFICATION_PENDING no catalogo.
 catalog,STATUS_REJECTED,0,"Observacoes REJECTED no catalogo (preservadas, nunca ajustadas)."
-view,INCLUDED_IN_VIEW,0,Observacoes com status em ['VERIFIED'] na visao 'verified'.
-view,EXCLUDED_BY_STATUS,54,Observacoes fora do conjunto de status da visao.
+view,INCLUDED_IN_VIEW,21,Observacoes com status em ['VERIFIED'] na visao 'verified'.
+view,EXCLUDED_BY_STATUS,33,Observacoes fora do conjunto de status da visao.
 class,EVIDENCE_CLASS_QUANTITATIVE,43,Medicoes quantitativas no catalogo (inclui quantitativas transcritas de evidence).
 class,EVIDENCE_CLASS_PUBLISHED_KINETIC,8,Parametros k/meia-vida publicados; nunca viram serie temporal.
 class,EVIDENCE_CLASS_QUALITATIVE,3,Narrativas qualitativas; nunca misturadas com medicoes numericas.
 fit,EXCLUDED_NOT_QUANTITATIVE,0,Linhas da visao fora de QUANTITATIVE_MEASUREMENT (parametros/narrativas).
-fit,ELIGIBLE_FOR_FIT,0,"Medicoes quantitativas em series compativeis (>=3 tempos, unidade unica)."
+fit,ELIGIBLE_FOR_FIT,21,"Medicoes quantitativas em series compativeis (>=3 tempos, unidade unica)."
 fit,EXCLUDED_NO_TIME_SERIES,0,"Quantitativas sem serie ajustavel (tempo ausente, <3 tempos ou unidade mista)."
-comparability,CROSS_STUDY_POOLING_BLOCKED,0,Sem insumo quantitativo nesta visao.
+comparability,CROSS_STUDY_POOLING_BLOCKED,1,"Curva unica entre estudos bloqueada: unidades ['mg equivalentes de cianidina-3-glicosídeo/L'], escalas ['mês'], matrizes ['Bebida mista de repolho roxo e rosela']; ajustes somente dentro de grupos compativeis."

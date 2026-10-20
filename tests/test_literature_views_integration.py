@@ -103,7 +103,7 @@ def test_evidence_classes_never_enter_fits(workdir):
     kinetics = pd.read_csv(
         workdir["root"] / "data" / "literature" / "processed" / "views"
         / "pending_exploratory" / "literature_kinetics.csv", dtype=str)
-    assert len(kinetics) == 9
+    assert len(kinetics) == 6
     published = pd.read_csv(
         workdir["root"] / "data" / "literature" / "processed" / "views"
         / "pending_exploratory" / "published_kinetic_parameters.csv", dtype=str)
@@ -119,8 +119,8 @@ def test_evidence_classes_never_enter_fits(workdir):
 def test_views_filter_status_without_promotion(workdir):
     catalog = lab.load_harmonized_catalog(workdir["root"])
     views = lab.split_literature_views(catalog)
-    assert len(views["verified"]) == 0
-    assert len(views["pending"]) == 54
+    assert len(views["verified"]) == 21
+    assert len(views["pending"]) == 33
     assert len(views["rejected"]) == 0
     assert len(views["combined"]) == 54
     tampered = catalog.copy()
@@ -137,16 +137,19 @@ def test_views_filter_status_without_promotion(workdir):
 
 
 def test_verified_default_excludes_pending(workdir):
+    """Visão aprovada (padrão) inclui STUDY_B verificado e exclui STUDY_A pendente."""
     root = workdir["root"]
     with pytest.warns(UserWarning, match="excluidos da analise aprovada"):
         lab.analyze_literature(root)
     kinetics = pd.read_csv(root / "data" / "literature" / "processed"
                            / "views" / "verified" / "literature_kinetics.csv", dtype=str)
-    assert len(kinetics) == 0
-    assert list(kinetics.columns) == lab.LITERATURE_FIT_COLUMNS
+    assert len(kinetics) == 3
+    assert set(lab.LITERATURE_FIT_COLUMNS).issubset(set(kinetics.columns))
+    assert set(kinetics["study_id"]) == {"STUDY_B"}
+    assert set(kinetics["verification_status"]) == {"VERIFIED"}
     html = (root / "data" / "literature" / "processed"
             / "views" / "verified" / "literature_report.html").read_text(encoding="utf-8")
-    assert "Nenhuma serie elegivel" in html
+    assert "Nenhuma serie elegivel" not in html
 
 
 def test_exploratory_only_when_explicit(workdir):

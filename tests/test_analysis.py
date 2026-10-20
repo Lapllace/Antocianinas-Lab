@@ -403,8 +403,18 @@ class TestAnalysis(unittest.TestCase):
         self.assertTrue(measurements["source_location"].str.strip().ne("").all())
         self.assertTrue(measurements["data_origin"].eq("PUBLISHED_ARTICLE").all())
         self.assertTrue(measurements["reported_or_calculated"].eq("reported").all())
-        self.assertTrue(measurements["verification_status"].eq("VERIFICATION_PENDING").all())
-        self.assertTrue(measurements["standard_deviation"].isna().all())
+        # Status de verificação: STUDY_B verificado (texto integral); os demais, pendentes.
+        verified_mask = measurements["verification_status"].eq("VERIFIED")
+        self.assertTrue(measurements.loc[verified_mask, "study_id"].eq("STUDY_B").all())
+        self.assertEqual(int(verified_mask.sum()), 21)
+        self.assertTrue(measurements.loc[~verified_mask, "verification_status"]
+                        .eq("VERIFICATION_PENDING").all())
+        # Desvios-padrão: preenchidos apenas para STUDY_B (transcritos da Tabela 8).
+        sd_mask = measurements["standard_deviation"].notna()
+        self.assertTrue(measurements.loc[sd_mask, "study_id"].eq("STUDY_B").all())
+        self.assertEqual(int(sd_mask.sum()), 21)
+        self.assertTrue(measurements.loc[measurements["study_id"] != "STUDY_B",
+                                         "standard_deviation"].isna().all())
 
         study_a = measurements.loc[measurements["study_id"] == "STUDY_A"]
         self.assertEqual(len(study_a), 18)
@@ -437,6 +447,34 @@ class TestAnalysis(unittest.TestCase):
         for package, expected_values in expected_b.items():
             observed = study_b.loc[study_b["package_material"] == package].sort_values("time_value")["value"].tolist()
             self.assertEqual(observed, expected_values)
+
+        # Validação determinística dos 21 pares (média, desvio-padrão) pela combinação
+        # de embalagem x mês, transcritos da Tabela 8 (p. 6) do texto integral de
+        # Muhamad et al. (2022) — dados do artigo, não artificiais.
+        table8_b = {
+            ("Vidro", 0): (263.40, 1.67), ("Vidro", 1): (132.10, 3.60), ("Vidro", 2): (87.75, 16.60),
+            ("Vidro", 3): (74.38, 2.21), ("Vidro", 4): (55.60, 0.87), ("Vidro", 5): (48.29, 0.96),
+            ("Vidro", 6): (34.36, 1.83),
+            ("Lata metálica", 0): (262.66, 0.87), ("Lata metálica", 1): (113.20, 3.96),
+            ("Lata metálica", 2): (94.54, 23.17), ("Lata metálica", 3): (71.80, 7.35),
+            ("Lata metálica", 4): (49.27, 1.93), ("Lata metálica", 5): (39.85, 0.85),
+            ("Lata metálica", 6): (30.50, 0.17),
+            ("Polipropileno", 0): (262.17, 1.04), ("Polipropileno", 1): (96.88, 0.71),
+            ("Polipropileno", 2): (88.21, 18.55), ("Polipropileno", 3): (40.42, 0.49),
+            ("Polipropileno", 4): (21.09, 1.31), ("Polipropileno", 5): (14.38, 0.17),
+            ("Polipropileno", 6): (10.44, 1.42),
+        }
+        actual_b = {
+            (row["package_material"], int(row["time_value"])): (
+                float(row["value"]), float(row["standard_deviation"]))
+            for _, row in study_b.iterrows()
+        }
+        self.assertEqual(len(actual_b), 21)
+        self.assertEqual(set(actual_b.keys()), set(table8_b.keys()))
+        for key in sorted(table8_b.keys()):
+            self.assertEqual(actual_b[key], table8_b[key],
+                             f"divergência de média/DP em {key[0]} x mês {key[1]}")
+
         self.assertEqual(len(evidence.loc[evidence["study_id"] == "STUDY_D"]), 3)
         reported_a = evidence.loc[evidence["study_id"] == "STUDY_A"].set_index("treatment_id")
         self.assertEqual(reported_a.loc["P4", "k_value"], 0.009)
@@ -512,7 +550,9 @@ class TestAnalysis(unittest.TestCase):
         self.assertTrue(kinetics["data_origin"].eq("PUBLISHED_ARTICLE").all())
         self.assertTrue(kinetics["reported_or_calculated"].eq("calculated_from_published_series").all())
         self.assertTrue(kinetics["source_url"].str.startswith("https://").all())
-        self.assertTrue(kinetics["verification_status"].eq("VERIFICATION_PENDING").all())
+        # Ajustes exploratórios mantêm o status de origem: STUDY_A pendente, STUDY_B verificado.
+        self.assertEqual(set(kinetics["verification_status"]),
+                         {"VERIFICATION_PENDING", "VERIFIED"})
 
     def test_experimental_plan_equalizes_initial_ph_and_separates_outcomes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

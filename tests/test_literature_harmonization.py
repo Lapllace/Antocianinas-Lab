@@ -133,7 +133,12 @@ def test_missing_values_preserved_without_imputation():
     df = mod.harmonize_measurements(measurements, evidence, status, studies, "TEST-001")
 
     measurement_obs = df[df["observation_id"].str.startswith("OBS-", na=False)]
-    assert measurement_obs["standard_deviation"].isna().all()
+    # STUDY_A permanece sem DP (sem imputação); STUDY_B tem DPs transcritos da fonte.
+    non_b = measurement_obs[measurement_obs["study_id"] != "STUDY_B"]
+    study_b = measurement_obs[measurement_obs["study_id"] == "STUDY_B"]
+    assert non_b["standard_deviation"].isna().all()
+    assert study_b["standard_deviation"].notna().all()
+    assert len(study_b) == 21
     assert (measurement_obs["replicate_type"] == "not_reported").all()
     assert (measurement_obs["value_original"].notna()).all()
 
@@ -148,7 +153,16 @@ def test_verification_status_not_auto_upgraded():
 
     df = mod.harmonize_measurements(measurements, evidence, status, studies, "TEST-001")
 
-    assert (df["verification_status"] == "VERIFICATION_PENDING").all()
+    # A harmonização não altera status: reproduz exatamente o manifesto
+    # (STUDY_B VERIFIED por revisão humana; STUDY_A pendente). Sem auto-promoção.
+    manifest = status.set_index(["study_id", "treatment_id", "time_value"])["verification_status"]
+    for _, row in df[df["observation_id"].str.startswith("OBS-", na=False)].iterrows():
+        key = (row["study_id"], row["treatment_id"], str(row["time_value_original"]))
+        assert row["verification_status"] == manifest.loc[key], (
+            f"status de {key} foi alterado pela harmonização"
+        )
+    assert set(df[df["study_id"] == "STUDY_B"]["verification_status"]) == {"VERIFIED"}
+    assert set(df[df["study_id"] == "STUDY_A"]["verification_status"]) == {"VERIFICATION_PENDING"}
 
 
 def test_deterministic_execution():
@@ -294,7 +308,7 @@ def test_source_locator_class_specific_reference() -> None:
 
 
 def test_source_locator_class_totals_on_current_base() -> None:
-    '''Base atual: 39 pendentes (medicoes) + 15 referenciados (evidencias) = 54 linhas.'''
+    '''Base atual: 18 pendentes (STUDY_A) + 36 referenciados (15 evidências + 21 STUDY_B) = 54 linhas.'''
     mod = _load_module()
     measurements = pd.read_csv(ROOT / 'data' / 'literature' / 'literature_measurements.csv', dtype=str)
     status = pd.read_csv(ROOT / 'data' / 'literature' / 'literature_verification_status.csv', dtype=str)
@@ -304,8 +318,8 @@ def test_source_locator_class_totals_on_current_base() -> None:
     pending = int((df['source_locator_class'] == 'TABLE_OR_FIGURE_PENDING').sum())
     referenced = int((df['source_locator_class'] == 'TABLE_OR_FIGURE_REFERENCED').sum())
     no_locator = int((df['source_locator_class'] == 'NO_SOURCE_LOCATOR').sum())
-    assert pending == 39, 'Esperado 39 pendentes, obteve ' + str(pending)
-    assert referenced == 15, 'Esperado 15 referenciados, obteve ' + str(referenced)
+    assert pending == 18, 'Esperado 18 pendentes, obteve ' + str(pending)
+    assert referenced == 36, 'Esperado 36 referenciados, obteve ' + str(referenced)
     assert no_locator == 0
 
 if __name__ == "__main__":
