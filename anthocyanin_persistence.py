@@ -242,7 +242,11 @@ def append_row_safely(
             "appended_count": 0,
         }
 
-    base = existing if not existing.empty else new_rows
+    # Compõe o conteúdo final concatenando os registros existentes aos
+    # novos (até aqui o arquivo não foi alterado). A reindexação preserva a
+    # ordem canônica de colunas do esquema de destino.
+    base = pd.concat([existing, new_rows], ignore_index=True, sort=False)
+    base = base.reindex(columns=list(new_rows.columns))
 
 
     target = Path(backup_parent or csv_path.parent) / "backups"

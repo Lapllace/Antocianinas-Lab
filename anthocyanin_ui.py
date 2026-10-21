@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 import anthocyanin_lab as lab
 import anthocyanin_persistence as persist
+import anthocyanin_import as ai
 from ui_theme import apply_theme
 
 # Caminhos dos artefatos do projeto.
@@ -687,6 +689,251 @@ def render_ml() -> None:
                    "independentes antes de qualquer conclusão científica.")
 
 
+def render_import_assistant() -> None:
+    """Importação assistida de medições experimentais (CSV, XLSX ou tabela colada).
+
+    Fluxo em estágios, sem gravar antes da confirmação explícita:
+    1. escolher o tipo de registro (estabilidade/cor/microbiologia);
+    2. interpretar a origem (arquivo enviado ou tabela colada);
+    3. mapear colunas de origem para os campos do esquema;
+    4. montar uma prévia editável com validação, duplicatas e unidades;
+    5. confirmar a importação — só então os validadores e a persistência
+       existentes são acionados (``append_row_safely``).
+    """
+    st.header("Importação assistida")
+    st.markdown(
+        "Reduza a digitação manual importando medições experimentais a partir de "
+        "arquivos **CSV/XLSX** ou de uma **tabela colada**. Os dados são mapeados "
+        "para os campos já usados pela aplicação e passam por uma prévia validada "
+        "antes de qualquer gravação."
+    )
+    st.info(
+        "Esta página importa apenas **medições experimentais** nos esquemas atuais. "
+        "Não insere referências bibliográficas nem resultados simulados. Valores e "
+        "unidades de origem são preservados — nada é corrigido, convertido ou "
+        "preenchido silenciosamente. Nenhuma linha é gravada antes da confirmação."
+    )
+
+    # --- Estado da sessão --------------------------------------------------
+    prev_rt = st.session_state.get("imp_record_type", "stability")
+    rt = st.selectbox(
+        "Tipo de registro (destino da importação)",
+        options=list(ai.RECORD_TYPES),
+        format_func=lambda r: ai.RECORD_LABELS[r],
+        index=list(ai.RECORD_TYPES).index(prev_rt),
+        key="imp_record_type_sel",
+        help="Estabilidade = método diferencial de pH; Cor = resposta colorimétrica; "
+        "Microbiologia = testes microbiológicos. Cada destino usa o seu próprio CSV.",
+    )
+    if rt != prev_rt:
+        # Mudou o tipo: reinicia o fluxo de importação.
+        _imp_reset_source()
+    st.session_state["imp_record_type"] = rt
+    target_fields = ai.columns_for(rt)
+
+    st.caption(f"Arquivo de destino: data/raw/{ai.csv_name_for(rt)}")
+
+    # --- Estágio 2: interpretar a origem ----------------------------------
+    st.subheader("2. Origem dos dados")
+    metodo = st.radio(
+        "Como deseja fornecer os dados",
+        ["Enviar arquivo", "Colar tabela"],
+        horizontal=True,
+        key="imp_metodo",
+    )
+    source_df = None
+    source_name = None
+    if metodo == "Enviar arquivo":
+        uploaded = st.file_uploader(
+            "Selecione um CSV ou XLSX",
+            type=["csv", "xlsx", "xlsm"],
+            key="imp_file",
+            help="CSV delimitado por vírgula ou planilha Excel .xlsx (primeira aba).",
+        )
+        if uploaded is not None:
+            try:
+                tmp_dir = st.session_state.get("imp_tmpdir")
+                if not tmp_dir:
+                    tmp_dir = tempfile.mkdtemp(prefix="antho_imp_")
+                    st.session_state["imp_tmpdir"] = tmp_dir
+                tmp_path = Path(tmp_dir) / uploaded.name
+                tmp_path.write_bytes(uploaded.getvalue())
+                source_df = ai.parse_source(path=tmp_path)
+                source_name = uploaded.name
+            except ValueError as exc:
+                st.error(str(exc))
+    else:
+        pasted = st.text_area(
+            "Cole a tabela aqui (colunas separadas por tabulação, vírgula ou ponto-e-vírgula)",
+            height=160,
+            key="imp_pasted",
+            placeholder="batch_id\tformulation\tstorage_condition\tday\t...\nB1\tnative\tC4_DARK\t0\t...",
+        )
+        if st.button("Interpretar tabela colada", key="imp_parse_paste"):
+            try:
+                source_df = ai.parse_source(pasted=pasted)
+                source_name = "tabela colada"
+                st.session_state["imp_source_df"] = source_df
+                st.session_state["imp_source_name"] = source_name
+                st.session_state["imp_preview_built"] = False
+            except ValueError as exc:
+                st.error(str(exc))
+        # Manter a origem entre reruns ao colar.
+        if source_df is None and "imp_source_df" in st.session_state:
+            source_df = st.session_state["imp_source_df"]
+            source_name = st.session_state.get("imp_source_name")
+
+    # Para arquivo: a cada rerun com upload presente, reafirmamos a origem.
+    if source_df is not None and metodo == "Enviar arquivo":
+        _imp_update_source(st.session_state, source_df, source_name)
+
+    if source_df is None:
+        st.session_state.pop("imp_source_df", None)
+        st.caption("Nenhuma origem interpretada ainda. Envie um arquivo ou cole uma tabela.")
+        return
+
+    st.success(f"{len(source_df)} linha(s) lida(s) de “{source_name}”.")
+    with st.expander("Colunas detectadas na origem", expanded=False):
+        st.write(list(source_df.columns))
+
+    _imp_render_mapping_and_preview(rt, target_fields, source_df)
+
+
+def _imp_update_source(session_state, source_df, source_name) -> None:
+    """Atualiza a origem enviada e invalida a prévia apenas se ela mudou."""
+    previous_df = session_state.get("imp_source_df")
+    source_changed = (
+        not isinstance(previous_df, pd.DataFrame)
+        or session_state.get("imp_source_name") != source_name
+        or not previous_df.equals(source_df)
+    )
+    if source_changed:
+        session_state["imp_preview_built"] = False
+    session_state["imp_source_df"] = source_df
+    session_state["imp_source_name"] = source_name
+
+
+def _imp_reset_source() -> None:
+    for key in ("imp_source_df", "imp_source_name", "imp_preview_built",
+                "imp_preview_rows", "imp_mapping"):
+        st.session_state.pop(key, None)
+
+
+def _imp_render_mapping_and_preview(rt: str, target_fields, source_df) -> None:
+    """Estágios 3 (mapeamento) e 4/5 (prévia editável e confirmação)."""
+    # --- Estágio 3: mapeamento -------------------------------------------
+    st.subheader("3. Mapeamento de colunas")
+    st.caption(
+        "Sugestão automática para correspondências inequívocas. Casos ambíguos "
+        "ou ausentes ficam como “(ignorar)” — selecione manualmente."
+    )
+    suggested = ai.suggest_mapping(list(source_df.columns), target_fields)
+    if "imp_mapping" not in st.session_state:
+        st.session_state["imp_mapping"] = suggested
+    mapping = dict(st.session_state["imp_mapping"])
+    options = ["(ignorar)"] + list(source_df.columns)
+    new_mapping = {}
+    for field in target_fields:
+        default = mapping.get(field) or suggested.get(field)
+        idx = options.index(default) if default in options else 0
+        chosen = st.selectbox(
+            f"{field}", options, index=idx, key=f"imp_map_{field}",
+            help=f"Coluna de origem que alimenta o campo “{field}”.",
+        )
+        new_mapping[field] = None if chosen == "(ignorar)" else chosen
+    st.session_state["imp_mapping"] = new_mapping
+
+    if st.button("Montar prévia", type="primary", key="imp_build_preview"):
+        mapped = ai.apply_mapping(source_df, new_mapping, target_fields)
+        existing = persist.load_csv(CSV_PATH[rt], target_fields)
+        preview = ai.build_preview(mapped, rt, existing_df=existing)
+        st.session_state["imp_preview_rows"] = preview["rows"]
+        st.session_state["imp_preview_summary"] = preview["summary"]
+        st.session_state["imp_preview_built"] = True
+
+    _imp_render_preview(rt, target_fields)
+
+
+def _imp_render_preview(rt: str, target_fields) -> None:
+    """Estágios 4 (prévia editável) e 5 (confirmação)."""
+    if not st.session_state.get("imp_preview_built"):
+        return
+    rows = st.session_state["imp_preview_rows"]
+    summary = st.session_state["imp_preview_summary"]
+
+    st.subheader("4. Prévia da importação")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Linhas totais", summary["total"])
+    c2.metric("Válidas", summary["validas"])
+    c3.metric("Inválidas", summary["invalidas"])
+    c4.metric("Duplicatas", summary["duplicatas"])
+
+    if summary["campos_obrigatorios_ausentes"]:
+        st.warning("Campos obrigatórios ausentes: " + ", ".join(summary["campos_obrigatorios_ausentes"]))
+    if summary["valores_fora_limite_ou_invalidos"]:
+        with st.expander("Valores fora dos limites aceitos"):
+            for msg in summary["valores_fora_limite_ou_invalidos"]:
+                st.write("• " + msg)
+    if summary["unidades_ausentes"]:
+        with st.expander("Unidades ausentes"):
+            for msg in summary["unidades_ausentes"]:
+                st.write("• " + msg)
+
+    display = ai.preview_rows_to_frame(rows, target_fields)
+    edited = st.data_editor(
+        display,
+        num_rows="fixed",
+        use_container_width=True,
+        hide_index=True,
+        disabled=["linha", "erros", "avisos"],
+        key="imp_editor",
+        column_config={
+            "_excluir": st.column_config.CheckboxColumn(
+                "Excluir", help="Marque para não importar esta linha.", default=False
+            )
+        },
+    )
+
+    st.subheader("5. Confirmar importação")
+    st.warning(
+        "Nenhuma linha é gravada antes deste botão. Linhas marcadas em "
+        "“Excluir” são descartadas. Linhas com erros restantes impedem a "
+        "gravação de todo o lote (nada é gravado parcialmente)."
+    )
+    if st.button("Confirmar importação", type="primary", key="imp_confirm"):
+        _imp_commit(rt, target_fields, edited)
+
+
+def _imp_commit(rt: str, target_fields, edited) -> None:
+    """Estágio 5: gravação explícita via persistência existente."""
+    final = ai.finalize_from_edited(edited, target_fields)
+    if final.empty:
+        st.error("Nenhuma linha restante para importar após excluir as marcadas.")
+        return
+    # Revalida as linhas finais (mesmas regras da prévia) antes de gravar.
+    recheck = ai.build_preview(final, rt, existing_df=persist.load_csv(CSV_PATH[rt], target_fields))
+    if recheck["summary"]["invalidas"] > 0:
+        st.error("Ainda há linhas inválidas após a edição. Corrija ou exclua antes de confirmar:")
+        for r in recheck["rows"]:
+            if r["erros"]:
+                st.write(f"Linha {r['linha']}: {r['erros']}")
+        return
+    result = persist.append_row_safely(
+        CSV_PATH[rt], final, ai.key_for(rt), ai.combined_validator(rt)
+    )
+    st.session_state["imp_last_result"] = result
+    if result["status"] == "success":
+        st.success(result["message"])
+        if result.get("backup_path"):
+            st.caption(f"Backup criado: {result['backup_path']}")
+        # Atualiza o cache de leitura para as próximas páginas.
+        st.cache_data.clear()
+        _imp_reset_source()
+    else:
+        st.error(result["message"])
+        st.caption("Nenhuma alteração foi gravada. Os registros existentes estão preservados.")
+
+
 def main() -> None:
     """Monta a aplicação e preserva a navegação já existente."""
     apply_theme()
@@ -714,6 +961,7 @@ def main() -> None:
         "Cadastro de estabilidade",
         "Cadastro de cor",
         "Cadastro de microbiologia",
+        "Importação assistida",
         "Consulta e gestão",
         "Literatura",
         "Simulador",
@@ -744,6 +992,8 @@ def main() -> None:
         render_color_form()
     elif page == "Cadastro de microbiologia":
         render_micro_form()
+    elif page == "Importação assistida":
+        render_import_assistant()
     elif page == "Consulta e gestão":
         render_query_management()
     elif page == "Literatura":
@@ -755,4 +1005,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
